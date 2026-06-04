@@ -41,7 +41,7 @@ const TYPE_META: Record<string, { color: string; label: string; short: string }>
 
 const TICKER_ITEMS = [
   "857 Trading Days · Jan 2023–Jun 2026",
-  "89 Annotated Events Across 8 Categories",
+  "81 Annotated Events Across 8 Categories",
   "Event-Day Volatility 2.55× Normal Sessions",
   "Best Day: QQQ +12.1% · Apr 9 2025 — Tariff Pause",
   "Worst Day: QQQ −5.0% · Apr 8 2025 — China 104% Tariff",
@@ -107,6 +107,15 @@ function PctPill({ val }: { val: number | null }) {
     }}>{fmtPct(val)}</span>
   );
 }
+function SectionLabel({ num, title }: { num: string; title: string }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:4 }}>
+      <span className="mono" style={{ fontSize:11, fontWeight:800, color:C.blue, letterSpacing:"0.12em", opacity:0.7 }}>{num}</span>
+      <span style={{ fontWeight:800, fontSize:21, color:C.text, letterSpacing:"-0.02em" }}>{title}</span>
+      <div style={{ flex:1, height:1, background:"rgba(0,0,0,0.08)" }} />
+    </div>
+  );
+}
 const CHART_TOOLTIP = {
   contentStyle: { background: "#fff", border: "1px solid rgba(0,0,0,0.1)", borderRadius: 10, fontSize: 12 },
 };
@@ -130,10 +139,7 @@ export default function MarketEventDashboard() {
   // ── Timeline filtered rows ────────────────────────────────
   const filtered = useMemo(() => {
     let r = [...rows];
-    if (yearFilter !== "ALL") {
-      if (yearFilter === "2025–26") r = r.filter(x => x.date >= "2025");
-      else r = r.filter(x => x.date.startsWith(yearFilter));
-    }
+    if (yearFilter !== "ALL") r = r.filter(x => x.date.startsWith(yearFilter));
     if (evOnly) r = r.filter(x => !!x.et);
     if (extremeOnly) r = r.filter(x => Math.abs(x.qqq) >= 2);
     if (evTypeFilter !== "ALL") r = r.filter(x => x.et === evTypeFilter);
@@ -182,7 +188,7 @@ export default function MarketEventDashboard() {
           </h1>
           <p style={{ fontSize: 17, color: "#8e8e93", lineHeight: 1.7, maxWidth: 620, marginBottom: 40 }}>
             857 trading days of QQQ, SPY & NDX open→close returns annotated with{" "}
-            <span style={{ color: "#e5e5ea" }}>89 major market events</span> — Fed decisions, tariff shocks, AI launches, IPOs, earnings, and more. Every correlation, pattern, and causal signal in one place.
+            <span style={{ color: "#e5e5ea" }}>81 major market events</span> — Fed decisions, tariff shocks, AI launches, IPOs, earnings, and more. Every correlation, pattern, and causal signal in one place.
           </p>
 
           {/* KPI hero cards */}
@@ -233,7 +239,7 @@ export default function MarketEventDashboard() {
           <StatChip label="Event Days"      val={s.event_days}                           accent={C.blue}   sub={`${((s.event_days/s.total_days)*100).toFixed(1)}% of sessions`} />
           <StatChip label="Avg Return/Day"  val={fmtPct(s.avg_all,3)}                    accent={s.avg_all>=0?C.green:C.red} />
           <StatChip label="Event-Day Vol"   val={s.vol_event.toFixed(2)+"%"}             accent={C.orange} sub="annualized σ" />
-          <StatChip label="Normal-Day Vol"  val={s.vol_non_event.toFixed(2)+"%"}         accent={C.cyan}   sub={`${(s.vol_event/s.vol_non_event).toFixed(2)}× lower`} />
+          <StatChip label="Normal-Day Vol"  val={s.vol_non_event.toFixed(2)+"%"}         accent={C.cyan}   sub={`${(100-((s.event_days/s.total_days)*100)).toFixed(1)}% of all sessions`} />
           <StatChip label="Best Day (QQQ)"  val={"+"+s.best.qqq.toFixed(2)+"%"}          accent={C.green}  sub={s.best.date} />
           <StatChip label="Worst Day (QQQ)" val={s.worst.qqq.toFixed(2)+"%"}             accent={C.red}    sub={s.worst.date} />
           <StatChip label="±2%+ Days"       val={s.big_moves}                            accent={C.orange} sub={`${((s.big_moves/s.total_days)*100).toFixed(1)}% of days`} />
@@ -243,6 +249,7 @@ export default function MarketEventDashboard() {
             SECTION: OVERVIEW
         ════════════════════════════════════ */}
         <div id="section-overview" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          <SectionLabel num="01" title="Overview" />
 
             {/* Cumulative Return */}
             <Card accent={C.blue} style={{ padding:24 }}>
@@ -343,6 +350,7 @@ export default function MarketEventDashboard() {
         </div>
 
         <div id="section-time-patterns" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          <SectionLabel num="02" title="Time Patterns" />
 
             {/* Day of week + Monthly side by side */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }} className="two-col">
@@ -423,15 +431,20 @@ export default function MarketEventDashboard() {
                 ))}
               </div>
               <div style={{ marginTop:16, display:"flex", gap:16, alignItems:"center", flexWrap:"wrap" }}>
-                <div style={{ fontSize:11, color:C.dim }}>Outlined squares = annotated events</div>
-                <div style={{ display:"flex", gap:6, alignItems:"center" }}>
-                  <div style={{ width:8, height:8, borderRadius:2, background:`rgba(52,199,89,0.9)` }} />
-                  <span style={{ fontSize:11, color:C.dim }}>Strong up (&gt;3%)</span>
-                </div>
-                <div style={{ display:"flex", gap:6, alignItems:"center" }}>
-                  <div style={{ width:8, height:8, borderRadius:2, background:`rgba(255,59,48,0.9)` }} />
-                  <span style={{ fontSize:11, color:C.dim }}>Strong down (&lt;−3%)</span>
-                </div>
+                <div style={{ fontSize:11, color:C.dim, fontWeight:600 }}>Intensity = magnitude · Outlined = annotated event</div>
+                {[
+                  { bg:"rgba(52,199,89,0.22)", label:"< +1%" },
+                  { bg:"rgba(52,199,89,0.55)", label:"+1–3%" },
+                  { bg:"rgba(52,199,89,0.95)", label:"> +3%" },
+                  { bg:"rgba(255,59,48,0.22)", label:"> −1%" },
+                  { bg:"rgba(255,59,48,0.55)", label:"−1–3%" },
+                  { bg:"rgba(255,59,48,0.95)", label:"< −3%" },
+                ].map(s => (
+                  <div key={s.label} style={{ display:"flex", gap:5, alignItems:"center" }}>
+                    <div style={{ width:8, height:8, borderRadius:2, background:s.bg }} />
+                    <span style={{ fontSize:11, color:C.dim }}>{s.label}</span>
+                  </div>
+                ))}
               </div>
             </Card>
 
@@ -483,6 +496,7 @@ export default function MarketEventDashboard() {
         </div>
 
         <div id="section-event-intel" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          <SectionLabel num="03" title="Event Intelligence" />
 
             {/* Avg return by type */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }} className="two-col">
@@ -525,7 +539,7 @@ export default function MarketEventDashboard() {
                             <td style={{ padding:"10px 16px" }}>
                               <span style={{ fontSize:11, fontWeight:700, color:m?.color??C.blue, background:(m?.color??C.blue)+"15", border:`1px solid ${(m?.color??C.blue)}30`, borderRadius:20, padding:"2px 8px" }}>{ts.type}</span>
                             </td>
-                            <td className="mono" style={{ padding:"10px 16px", color:C.dim }}>{ts.count}</td>
+                            <td className="mono" style={{ padding:"10px 16px", color:C.dim }}>{ts.count}{ts.count < 5 && <span style={{ fontSize:9, color:C.orange, marginLeft:4, fontWeight:700 }}>LOW N</span>}</td>
                             <td style={{ padding:"10px 16px" }}><PctPill val={ts.avg} /></td>
                             <td className="mono" style={{ padding:"10px 16px", fontWeight:700, color:wr>=50?C.green:wr>=40?C.orange:C.red }}>{wr.toFixed(0)}%</td>
                             <td className="mono" style={{ padding:"10px 16px", color:ts.vol>2?C.red:C.dim }}>σ {ts.vol.toFixed(2)}%</td>
@@ -623,7 +637,7 @@ export default function MarketEventDashboard() {
               <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:16 }}>Key Findings: What the Data Actually Shows</div>
               {[
                 { color:"#5856d6", title:"AI events are the strongest catalyst (89% win rate)", body:"Avg +0.46% QQQ, 8 of 9 events positive. The only exception was DeepSeek (Jan 27 2025) which dragged QQQ −3.8% intraday as NVDA fell 17%. Every other AI event — Sora, GPT-4o, Apple Intelligence, Stargate — was positive." },
-                { color:"#ff2d55", title:"Banking crisis days average +0.96% — a counterintuitive positive", body:"Markets front-run FDIC/Fed backstop announcements faster than the initial panic. SVB's closure weekend was already partially priced by Monday open; the BTFP facility announcement drove a relief rally. Bailout speed matters more than the crisis itself." },
+                { color:"#ff2d55", title:"Banking crisis days average +0.96% — a counterintuitive positive (n=3)", body:"Markets front-run FDIC/Fed backstop announcements faster than the initial panic. SVB's closure weekend was already partially priced by Monday open; the BTFP facility announcement drove a relief rally. Bailout speed matters more than the crisis itself. Small sample — treat with caution." },
                 { color:C.blue,   title:"Fed days are a perfect coin flip: 7 up, 7 down (avg +0.07%)", body:"The decision itself is irrelevant — only the language vs expectations matters. The Dec 2024 FOMC (−3.5%) held rates but projected only 2 cuts for 2025 instead of 4. Jun 2023 held rates for the first time in 15 months and rallied +0.8%." },
                 { color:C.orange, title:"Macro data days skew negative: avg −0.48%", body:"Hot CPI means rate fears. Weak jobs means recession fears. Strong jobs means 'Fed won't cut.' The market finds a reason to sell on almost any data outcome during uncertain cycles. CPI prints are particularly toxic for QQQ vs SPY." },
                 { color:"#ff6b35",title:"Political (tariff) events have the highest volatility (σ=4.32%) but positive avg", body:"Apr 9 2025 (+12.1%) alone pulls the average positive. Excluding that day, political events average −0.8%. The lesson: tariff escalations are predictably negative; pause/rollback announcements are massive positive shocks." },
@@ -640,9 +654,48 @@ export default function MarketEventDashboard() {
               ))}
             </Card>
 
+            {/* Biggest unexplained moves */}
+            {(() => {
+              const unexplained = (rows as Row[])
+                .filter(r => !r.et && Math.abs(r.qqq) >= 1.5)
+                .sort((a, b) => Math.abs(b.qqq) - Math.abs(a.qqq))
+                .slice(0, 15);
+              return (
+                <Card accent={C.faint} style={{ overflow:"hidden" }}>
+                  <CardHeader title="Biggest Unexplained Moves" sub="Largest QQQ swings (≥ 1.5%) on days with no annotated event — what drove these?" />
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                      <thead>
+                        <tr style={{ borderBottom:"1px solid rgba(0,0,0,0.08)" }}>
+                          {["#","Date","QQQ","SPY","Likely Driver"].map(h=>(
+                            <th key={h} style={{ padding:"9px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unexplained.map((r, i) => (
+                          <tr key={r.date} className="tr-hover" style={{ borderBottom:"1px solid rgba(0,0,0,0.04)", background:i%2===0?"transparent":"rgba(0,0,0,0.01)" }}>
+                            <td className="mono" style={{ padding:"10px 16px", color:C.faint, fontSize:11 }}>{i+1}</td>
+                            <td className="mono" style={{ padding:"10px 16px", color:C.dim, whiteSpace:"nowrap" }}>{r.date}</td>
+                            <td style={{ padding:"10px 16px" }}><PctPill val={r.qqq} /></td>
+                            <td style={{ padding:"10px 16px" }}><PctPill val={r.spy??null} /></td>
+                            <td style={{ padding:"10px 16px", fontSize:12, color:C.dim, fontStyle:"italic" }}>No annotated event — possible follow-through, positioning, or untracked catalyst</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div style={{ padding:"12px 24px", fontSize:12, color:C.dim, borderTop:"1px solid rgba(0,0,0,0.06)" }}>
+                    These moves represent gaps in the annotation — large price action driven by momentum, sector rotation, macro regime shifts, or events not yet catalogued. Cross-reference with news archives for the full picture.
+                  </div>
+                </Card>
+              );
+            })()}
+
         </div>
 
         <div id="section-trends" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          <SectionLabel num="04" title="Trends" />
 
             {/* Rolling volatility */}
             <Card accent={C.orange} style={{ padding:24 }}>
@@ -717,15 +770,18 @@ export default function MarketEventDashboard() {
 
         </div>
 
-        <div id="section-timeline">
+        <div id="section-timeline" style={{ display:"flex", flexDirection:"column", gap:0 }}>
+          <SectionLabel num="05" title="Full Timeline" />
+          <div style={{ marginBottom:16 }} />
             {/* Filters */}
             <Card style={{ padding:"16px 20px", marginBottom:16, borderTop:`2px solid ${C.blue}` }}>
               <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
                 {["ALL","2026","2025","2024","2023"].map(y=>(
-                  <button key={y} onClick={()=>{setYearFilter(y==="2025"?"2025":y==="2026"?"2025–26":y);setPage(0);}} style={{
-                    padding:"5px 12px", borderRadius:20, border:`1px solid ${yearFilter===y||(y==="2026"&&yearFilter==="2025–26")||(y==="2025"&&yearFilter==="2025")?C.blue:"rgba(0,0,0,0.12)"}`,
-                    background: (yearFilter==="ALL"&&y==="ALL")||(yearFilter==="2025–26"&&(y==="2025"||y==="2026"))||(yearFilter===y) ? C.blue+"12":"transparent",
-                    color: (yearFilter===y||(yearFilter==="2025–26"&&(y==="2025"||y==="2026"))) ? C.blue:C.dim,
+                  <button key={y} onClick={()=>{setYearFilter(y);setPage(0);}} style={{
+                    padding:"5px 12px", borderRadius:20,
+                    border:`1px solid ${yearFilter===y?C.blue:"rgba(0,0,0,0.12)"}`,
+                    background: yearFilter===y ? C.blue+"12":"transparent",
+                    color: yearFilter===y ? C.blue:C.dim,
                     fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
                   }}>{y}</button>
                 ))}
@@ -826,12 +882,27 @@ export default function MarketEventDashboard() {
         {/* Footer */}
         <div style={{ marginTop:48, paddingTop:24, borderTop:"1px solid rgba(0,0,0,0.08)", display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
           <div style={{ fontSize:11, color:C.faint }}>Data: Yahoo Finance · Open→Close intraday return · Not adjusted for dividends or overnight gaps · For informational use only</div>
-          <div style={{ display:"flex", gap:20 }}>
+          <div style={{ display:"flex", gap:20, alignItems:"center" }}>
             <a href="https://x.com/Trace_Cohen" target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:C.dim, textDecoration:"none", fontWeight:600 }}>@Trace_Cohen</a>
             <a href="mailto:t@nyvp.com" style={{ fontSize:12, color:C.dim, textDecoration:"none", fontWeight:600 }}>t@nyvp.com</a>
           </div>
         </div>
       </div>
+
+      {/* Scroll to top */}
+      <button onClick={()=>window.scrollTo({top:0,behavior:"smooth"})} style={{
+        position:"fixed", bottom:28, right:28, zIndex:100,
+        width:42, height:42, borderRadius:"50%",
+        background:C.blue, border:"none", cursor:"pointer",
+        boxShadow:"0 4px 16px rgba(0,113,227,0.4)",
+        display:"flex", alignItems:"center", justifyContent:"center",
+        fontSize:18, color:"#fff", fontFamily:"inherit",
+        transition:"all 0.2s",
+      }}
+      onMouseEnter={e=>(e.currentTarget.style.transform="scale(1.1)")}
+      onMouseLeave={e=>(e.currentTarget.style.transform="scale(1)")}
+      title="Back to top"
+      >↑</button>
 
       <style>{`
         * { box-sizing:border-box; }
