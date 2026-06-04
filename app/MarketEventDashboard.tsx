@@ -115,7 +115,6 @@ const SECTIONS = ["Overview", "Time Patterns", "Event Intel", "Trends", "Timelin
 
 // ── COMPONENT ─────────────────────────────────────────────────
 export default function MarketEventDashboard() {
-  const [activeSection, setActiveSection] = useState<string>("Overview");
   const [yearFilter, setYearFilter]   = useState("ALL");
   const [evTypeFilter, setEvTypeFilter] = useState("ALL");
   const [evOnly, setEvOnly]           = useState(false);
@@ -209,13 +208,16 @@ export default function MarketEventDashboard() {
       <div className="nav-glass" style={{ position:"sticky", top:0, zIndex:50 }}>
         <div style={{ maxWidth:1140, margin:"0 auto", padding:"0 24px", display:"flex", alignItems:"center", gap:4, height:52, overflowX:"auto" }}>
           {SECTIONS.map(sec => (
-            <button key={sec} onClick={() => { setActiveSection(sec); document.getElementById("dash-content")?.scrollIntoView({behavior:"smooth"}); }} style={{
-              color: activeSection === sec ? "#f5f5f7" : "#8e8e93",
-              background: activeSection === sec ? "rgba(255,255,255,0.1)" : "transparent",
+            <button key={sec} onClick={() => document.getElementById(`section-${sec.toLowerCase().replace(" ","-")}`)?.scrollIntoView({behavior:"smooth",block:"start"})} style={{
+              color: "#8e8e93",
+              background: "transparent",
               border:"none", padding:"5px 14px", borderRadius:20, fontSize:12,
               fontWeight:600, letterSpacing:"0.02em", cursor:"pointer",
               fontFamily:"inherit", whiteSpace:"nowrap", transition:"all 0.15s",
-            }}>{sec}</button>
+            }}
+            onMouseEnter={e=>(e.currentTarget.style.color="#f5f5f7")}
+            onMouseLeave={e=>(e.currentTarget.style.color="#8e8e93")}
+            >{sec}</button>
           ))}
           <div style={{ flex:1 }} />
           <span style={{ fontSize:11, color:"#6e6e73", whiteSpace:"nowrap" }}>QQQ · SPY · NDX · 2023–2026</span>
@@ -223,10 +225,10 @@ export default function MarketEventDashboard() {
       </div>
 
       {/* ════ MAIN CONTENT ════ */}
-      <div id="dash-content" style={{ maxWidth:1140, margin:"0 auto", padding:"32px 24px 100px" }}>
+      <div id="dash-content" style={{ maxWidth:1140, margin:"0 auto", padding:"32px 24px 100px", display:"flex", flexDirection:"column", gap:60 }}>
 
         {/* ── Persistent stat row ── */}
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))", gap:12, marginBottom:28 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))", gap:12 }}>
           <StatChip label="Total Days"      val={s.total_days}                           accent={C.blue}   sub="Jan 2023 – Jun 2026" />
           <StatChip label="Event Days"      val={s.event_days}                           accent={C.blue}   sub={`${((s.event_days/s.total_days)*100).toFixed(1)}% of sessions`} />
           <StatChip label="Avg Return/Day"  val={fmtPct(s.avg_all,3)}                    accent={s.avg_all>=0?C.green:C.red} />
@@ -240,8 +242,7 @@ export default function MarketEventDashboard() {
         {/* ════════════════════════════════════
             SECTION: OVERVIEW
         ════════════════════════════════════ */}
-        {activeSection === "Overview" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <div id="section-overview" style={{ display:"flex", flexDirection:"column", gap:20 }}>
 
             {/* Cumulative Return */}
             <Card accent={C.blue} style={{ padding:24 }}>
@@ -339,14 +340,9 @@ export default function MarketEventDashboard() {
               </div>
             </Card>
 
-          </div>
-        )}
+        </div>
 
-        {/* ════════════════════════════════════
-            SECTION: TIME PATTERNS
-        ════════════════════════════════════ */}
-        {activeSection === "Time Patterns" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <div id="section-time-patterns" style={{ display:"flex", flexDirection:"column", gap:20 }}>
 
             {/* Day of week + Monthly side by side */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }} className="two-col">
@@ -484,14 +480,9 @@ export default function MarketEventDashboard() {
               })()}
             </Card>
 
-          </div>
-        )}
+        </div>
 
-        {/* ════════════════════════════════════
-            SECTION: EVENT INTELLIGENCE
-        ════════════════════════════════════ */}
-        {activeSection === "Event Intel" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <div id="section-event-intel" style={{ display:"flex", flexDirection:"column", gap:20 }}>
 
             {/* Avg return by type */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }} className="two-col">
@@ -649,14 +640,9 @@ export default function MarketEventDashboard() {
               ))}
             </Card>
 
-          </div>
-        )}
+        </div>
 
-        {/* ════════════════════════════════════
-            SECTION: TRENDS
-        ════════════════════════════════════ */}
-        {activeSection === "Trends" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <div id="section-trends" style={{ display:"flex", flexDirection:"column", gap:20 }}>
 
             {/* Rolling volatility */}
             <Card accent={C.orange} style={{ padding:24 }}>
@@ -729,14 +715,9 @@ export default function MarketEventDashboard() {
               </Card>
             </div>
 
-          </div>
-        )}
+        </div>
 
-        {/* ════════════════════════════════════
-            SECTION: TIMELINE
-        ════════════════════════════════════ */}
-        {activeSection === "Timeline" && (
-          <div>
+        <div id="section-timeline">
             {/* Filters */}
             <Card style={{ padding:"16px 20px", marginBottom:16, borderTop:`2px solid ${C.blue}` }}>
               <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
@@ -840,8 +821,7 @@ export default function MarketEventDashboard() {
                 }}>Next →</button>
               </div>
             )}
-          </div>
-        )}
+        </div>
 
         {/* Footer */}
         <div style={{ marginTop:48, paddingTop:24, borderTop:"1px solid rgba(0,0,0,0.08)", display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
