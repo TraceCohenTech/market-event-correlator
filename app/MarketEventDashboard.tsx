@@ -113,6 +113,20 @@ function PctPill({ val }: { val: number | null }) {
     }}>{fmtPct(val)}</span>
   );
 }
+const WM_STYLE: React.CSSProperties = {
+  position: "absolute", top: 8, right: 10, zIndex: 10,
+  fontSize: 10, pointerEvents: "none", userSelect: "none",
+  color: "rgba(0,0,0,0.13)", letterSpacing: "0.03em",
+  fontFamily: "'SF Mono','Fira Code','Cascadia Code',monospace",
+};
+function ChartWrap({ children, height }: { children: React.ReactElement; height: number }) {
+  return (
+    <div style={{ position: "relative" }}>
+      <div style={WM_STYLE}>@Trace_Cohen · t@nyvp.com</div>
+      <ResponsiveContainer width="100%" height={height}>{children}</ResponsiveContainer>
+    </div>
+  );
+}
 function SectionLabel({ num, title }: { num: string; title: string }) {
   return (
     <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:4 }}>
@@ -280,7 +294,7 @@ export default function MarketEventDashboard() {
               <div style={{ fontSize:13, color:C.dim, marginBottom:20, lineHeight:1.5 }}>
                 Sum of daily open-to-close returns since Jan 2, 2023. Not total return (excludes overnight gaps & dividends) — measures pure intraday directional alpha. QQQ has accumulated <span style={{ color:C.blue, fontWeight:700 }}>{fmtPct((CUM_THIN as Array<{qqq:number}>).at(-1)?.qqq ?? 0, 1)}</span> of intraday gains vs SPY&apos;s <span style={{ color:C.orange, fontWeight:700 }}>{fmtPct((CUM_THIN as Array<{spy:number}>).at(-1)?.spy ?? 0, 1)}</span>.
               </div>
-              <ResponsiveContainer width="100%" height={280}>
+              <ChartWrap height={280}>
                 <LineChart data={CUM_THIN as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="date" tick={{ fill:C.dim, fontSize:10 }} tickFormatter={v => v.slice(2,7).replace("-","'")} interval={29} />
@@ -292,7 +306,7 @@ export default function MarketEventDashboard() {
                   <Line type="monotone" dataKey="spy" stroke={C.orange} strokeWidth={2}   dot={false} name="SPY" strokeDasharray="5 3" />
                   <Legend formatter={(v) => v === "qqq" ? "QQQ (Nasdaq-100)" : "SPY (S&P 500)"} />
                 </LineChart>
-              </ResponsiveContainer>
+              </ChartWrap>
             </Card>
 
             {/* Distribution + Streaks */}
@@ -302,7 +316,7 @@ export default function MarketEventDashboard() {
               <Card accent={C.cyan} style={{ padding:24 }}>
                 <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Daily Return Distribution</div>
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>Histogram of QQQ open→close returns across all 857 sessions. The market is modestly positively skewed — more large-up days than large-down days, but the fat left tail hits harder.</div>
-                <ResponsiveContainer width="100%" height={220}>
+                <ChartWrap height={220}>
                   <BarChart data={DISTRIBUTION as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="range" tick={{ fill:C.dim, fontSize:10 }} />
@@ -314,7 +328,7 @@ export default function MarketEventDashboard() {
                       ))}
                     </Bar>
                   </BarChart>
-                </ResponsiveContainer>
+                </ChartWrap>
               </Card>
 
               {/* Streak records + year comparison */}
@@ -383,7 +397,7 @@ export default function MarketEventDashboard() {
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>
                   Monday leads by a wide margin (+0.23%). Thursday is the only day averaging negative returns (−0.17%). The Mon–Thu spread is the most reliable day-of-week edge in the dataset.
                 </div>
-                <ResponsiveContainer width="100%" height={200}>
+                <ChartWrap height={200}>
                   <BarChart data={BY_DOW as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="day" tick={{ fill:C.dim, fontSize:12 }} />
@@ -396,7 +410,7 @@ export default function MarketEventDashboard() {
                       ))}
                     </Bar>
                   </BarChart>
-                </ResponsiveContainer>
+                </ChartWrap>
                 <div style={{ marginTop:16, display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6 }}>
                   {(BY_DOW as Array<{day:string;avg:number;up:number;count:number;vol:number}>).map(d => (
                     <div key={d.day} style={{ textAlign:"center", background:"rgba(0,0,0,0.03)", borderRadius:8, padding:"8px 4px" }}>
@@ -413,7 +427,7 @@ export default function MarketEventDashboard() {
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>
                   Across 2023–2026. January, March, and October lead. September and December lag — driven by FOMC surprises and year-end tax-loss selling respectively.
                 </div>
-                <ResponsiveContainer width="100%" height={200}>
+                <ChartWrap height={200}>
                   <BarChart data={BY_MONTH as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="month" tick={{ fill:C.dim, fontSize:10 }} />
@@ -426,7 +440,7 @@ export default function MarketEventDashboard() {
                       ))}
                     </Bar>
                   </BarChart>
-                </ResponsiveContainer>
+                </ChartWrap>
               </Card>
             </div>
 
@@ -434,6 +448,8 @@ export default function MarketEventDashboard() {
             <Card accent={C.green} style={{ padding:24 }}>
               <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Daily Return Calendar Heatmap — All 857 Sessions</div>
               <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>Each square = one trading day. Green = positive open→close, Red = negative. Intensity scales with magnitude. April 2025 is visually unmistakable — the tariff shock week followed by the +12% recovery.</div>
+              <div style={{ position:"relative" }}>
+              <div style={WM_STYLE}>@Trace_Cohen · t@nyvp.com</div>
               <div style={{ display:"flex", flexWrap:"wrap", gap:16 }}>
                 {(CALENDAR as Array<{ym:string;days:Array<{date:string;qqq:number;et?:string;en?:string}>}>).map(({ ym, days }) => (
                   <div key={ym} style={{ minWidth:0 }}>
@@ -452,6 +468,7 @@ export default function MarketEventDashboard() {
                     </div>
                   </div>
                 ))}
+              </div>
               </div>
               <div style={{ marginTop:16, display:"flex", gap:16, alignItems:"center", flexWrap:"wrap" }}>
                 <div style={{ fontSize:11, color:C.dim, fontWeight:600 }}>Intensity = magnitude · Outlined = annotated event</div>
@@ -477,10 +494,12 @@ export default function MarketEventDashboard() {
               <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>Avg daily QQQ return per calendar month. Quickly spot which months in which years drove or hurt performance.</div>
               {(() => {
                 const years = Array.from(new Set((BY_YM as Array<{year:string}>).map(r => r.year))).sort();
+
                 const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
                 const ym_map = Object.fromEntries((BY_YM as Array<{ym:string;avg:number;count:number}>).map(r => [r.ym, r]));
                 return (
-                  <div style={{ overflowX:"auto" }}>
+                  <div style={{ overflowX:"auto", position:"relative" }}>
+                  <div style={WM_STYLE}>@Trace_Cohen · t@nyvp.com</div>
                     <table style={{ borderCollapse:"collapse", fontSize:12, width:"100%" }}>
                       <thead>
                         <tr>
@@ -526,7 +545,7 @@ export default function MarketEventDashboard() {
               <Card accent={C.blue} style={{ padding:24 }}>
                 <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Avg QQQ Return by Event Type</div>
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>AI and Banking Crisis events are surprisingly bullish on average. Macro data and Geopolitical events are the most reliably negative catalysts for QQQ.</div>
-                <ResponsiveContainer width="100%" height={220}>
+                <ChartWrap height={220}>
                   <BarChart data={[...TYPE_STATS as object[]].sort((a:object,b:object)=>(b as {avg:number}).avg-(a as {avg:number}).avg)} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="type" tick={{ fill:C.dim, fontSize:10 }} />
@@ -539,7 +558,7 @@ export default function MarketEventDashboard() {
                       ))}
                     </Bar>
                   </BarChart>
-                </ResponsiveContainer>
+                </ChartWrap>
               </Card>
 
               <Card accent={C.green} style={{ overflow:"hidden" }}>
@@ -581,7 +600,7 @@ export default function MarketEventDashboard() {
               <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>
                 Average QQQ return in the days surrounding key event types. AI events show persistent positive drift after D0. Political (tariff) events show the sharpest D0 spike, then mean-reversion. Macro events show weakness before and after.
               </div>
-              <ResponsiveContainer width="100%" height={240}>
+              <ChartWrap height={240}>
                 <ComposedChart data={PRE_POST_WIDE as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="day" tick={{ fill:C.dim, fontSize:12 }} />
@@ -594,7 +613,7 @@ export default function MarketEventDashboard() {
                   ))}
                   <Legend />
                 </ComposedChart>
-              </ResponsiveContainer>
+              </ChartWrap>
             </Card>
 
             {/* QQQ-SPY spread */}
@@ -603,7 +622,7 @@ export default function MarketEventDashboard() {
               <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>
                 Positive spread = tech (QQQ) outperformed the broad market (SPY). AI and Earnings events drive the strongest tech outperformance. Macro and Geopolitical events trigger rotation away from tech into defensives, closing the spread.
               </div>
-              <ResponsiveContainer width="100%" height={200}>
+              <ChartWrap height={200}>
                 <BarChart data={SPREAD_BY_TYPE as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="type" tick={{ fill:C.dim, fontSize:10 }} />
@@ -616,7 +635,7 @@ export default function MarketEventDashboard() {
                     ))}
                   </Bar>
                 </BarChart>
-              </ResponsiveContainer>
+              </ChartWrap>
             </Card>
 
             {/* Top event impact days */}
@@ -746,7 +765,7 @@ export default function MarketEventDashboard() {
               <div style={{ fontSize:13, color:C.dim, marginBottom:20, lineHeight:1.5 }}>
                 Annualized volatility computed from daily open→close returns over a 30-day rolling window. Spikes correspond directly to tariff shock weeks (April 2025), Japan carry-trade unwind (August 2024), and DeepSeek (January 2025). The 2023 baseline ≈ 12–15% annualized; April 2025 peak exceeded 50%.
               </div>
-              <ResponsiveContainer width="100%" height={260}>
+              <ChartWrap height={260}>
                 <LineChart data={ROLLING_VOL as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="date" tick={{ fill:C.dim, fontSize:10 }} tickFormatter={v => (v as string).slice(2,7).replace("-","'")} interval={39} />
@@ -754,7 +773,7 @@ export default function MarketEventDashboard() {
                   <Tooltip {...CHART_TOOLTIP} labelFormatter={v=>`Date: ${v}`} formatter={(v:unknown)=>[`${(v as number).toFixed(1)}%`, "Annualized Vol"]} />
                   <Line type="monotone" dataKey="vol" stroke={C.orange} strokeWidth={2} dot={false} />
                 </LineChart>
-              </ResponsiveContainer>
+              </ChartWrap>
             </Card>
 
             {/* Volatility event breakdown + Year avg vol */}
@@ -786,7 +805,7 @@ export default function MarketEventDashboard() {
               <Card accent={C.blue} style={{ padding:24 }}>
                 <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Annual Volatility Comparison</div>
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>2025 was twice as volatile as 2023 — driven almost entirely by the tariff shock sequence in April. Without April 2025, 2025 vol would have been roughly in line with 2024.</div>
-                <ResponsiveContainer width="100%" height={180}>
+                <ChartWrap height={180}>
                   <BarChart data={BY_YEAR as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="year" tick={{ fill:C.dim, fontSize:12 }} />
@@ -798,7 +817,7 @@ export default function MarketEventDashboard() {
                       ))}
                     </Bar>
                   </BarChart>
-                </ResponsiveContainer>
+                </ChartWrap>
                 <div style={{ marginTop:12, display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8 }}>
                   {(BY_YEAR as Array<{year:string;avg:number;vol:number;up:number;count:number}>).map(y=>(
                     <div key={y.year} style={{ textAlign:"center", background:"rgba(0,0,0,0.03)", borderRadius:8, padding:"8px 6px" }}>
