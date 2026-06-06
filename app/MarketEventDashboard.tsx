@@ -137,7 +137,15 @@ function SectionLabel({ num, title }: { num: string; title: string }) {
   );
 }
 const CHART_TOOLTIP = {
-  contentStyle: { background: "#fff", border: "1px solid rgba(0,0,0,0.1)", borderRadius: 10, fontSize: 12 },
+  contentStyle: {
+    background: "rgba(255,255,255,0.82)",
+    backdropFilter: "blur(14px) saturate(1.6)",
+    WebkitBackdropFilter: "blur(14px) saturate(1.6)",
+    border: "1px solid rgba(255,255,255,0.35)",
+    borderRadius: 12,
+    fontSize: 12,
+    boxShadow: "0 4px 24px rgba(0,0,0,0.10), inset 0 1px 0 rgba(255,255,255,0.65)",
+  },
 };
 
 const UNEXPLAINED_DRIVERS: Record<string, string> = {
@@ -237,8 +245,25 @@ export default function MarketEventDashboard() {
               { badge:"RECORD",    label:"Best Single Day",      val:"+12.1%", sub:"Apr 9 2025 — 90-day tariff pause", accent: C.cyan   },
               { badge:"EDGE",      label:"Monday vs Thursday",   val:"+0.40%", sub:"best vs worst day of week spread", accent: C.orange },
             ].map(k => (
-              <div key={k.label} style={{ background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.08)", borderTop:`2px solid ${k.accent}`, borderRadius:14, padding:"16px 18px" }}>
-                <span style={{ fontSize:9, fontWeight:800, color:k.accent, letterSpacing:"0.1em", background:k.accent+"18", border:`1px solid ${k.accent}30`, borderRadius:4, padding:"2px 6px", display:"inline-block", marginBottom:10 }}>{k.badge}</span>
+              <div key={k.label} style={{
+                position: "relative",
+                background: "rgba(255,255,255,0.07)",
+                backdropFilter: "blur(20px) saturate(1.8)",
+                WebkitBackdropFilter: "blur(20px) saturate(1.8)",
+                border: "1px solid rgba(255,255,255,0.14)",
+                borderTop: `2px solid ${k.accent}`,
+                borderRadius: 14,
+                padding: "16px 18px",
+                boxShadow: `0 8px 32px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 0.5px rgba(255,255,255,0.06)`,
+                overflow: "hidden",
+                transition: "box-shadow 0.2s ease, transform 0.2s ease",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = `0 16px 48px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.18), 0 0 0 0.5px rgba(255,255,255,0.10)`; }}
+              onMouseLeave={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = `0 8px 32px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 0.5px rgba(255,255,255,0.06)`; }}
+              >
+                {/* specular highlight */}
+                <div style={{ position:"absolute", top:0, left:0, right:0, height:40, background:"linear-gradient(to bottom, rgba(255,255,255,0.08), transparent)", borderRadius:"14px 14px 0 0", pointerEvents:"none" }} />
+                <span style={{ fontSize:9, fontWeight:800, color:k.accent, letterSpacing:"0.1em", background:k.accent+"25", border:`1px solid ${k.accent}40`, borderRadius:4, padding:"2px 6px", display:"inline-block", marginBottom:10 }}>{k.badge}</span>
                 <div className="mono" style={{ fontSize:28, fontWeight:800, color:"#f5f5f7", lineHeight:1, marginBottom:6 }}>{k.val}</div>
                 <div style={{ fontSize:11, color:"#8e8e93", fontWeight:600, marginBottom:3 }}>{k.label}</div>
                 <div style={{ fontSize:11, color:"#6e6e73" }}>{k.sub}</div>
@@ -1050,7 +1075,7 @@ export default function MarketEventDashboard() {
         @keyframes ticker{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
         .pulse-dot{animation:pulse-dot 2s ease-in-out infinite;}
         @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:0.4}}
-        .nav-glass{background:rgba(0,0,0,0.78);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-bottom:1px solid rgba(255,255,255,0.06);}
+        .nav-glass{background:rgba(0,0,0,0.62);backdrop-filter:blur(24px) saturate(1.8);-webkit-backdrop-filter:blur(24px) saturate(1.8);border-bottom:1px solid rgba(255,255,255,0.10);box-shadow:0 1px 0 rgba(255,255,255,0.04), inset 0 1px 0 rgba(255,255,255,0.07);}
         @media(max-width:680px){.two-col{grid-template-columns:1fr !important;}}
       `}</style>
     </div>
