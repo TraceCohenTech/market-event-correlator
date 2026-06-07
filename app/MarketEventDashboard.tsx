@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from "react";
 import {
-  LineChart, Line, BarChart, Bar, ComposedChart,
+  LineChart, Line, BarChart, Bar, ComposedChart, Area, AreaChart,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   Cell, ReferenceLine, Legend,
 } from "recharts";
@@ -11,6 +11,11 @@ import {
   BY_YEAR, BY_YM, DISTRIBUTION, ROLLING_VOL, PRE_POST_WIDE,
   STREAKS, TOP_EVENT_DAYS, SPREAD_BY_TYPE, CALENDAR,
 } from "./data";
+import type {
+  Row, CumPoint, TypeStat, DowStat, MonthStat, YearStat, YearMonthStat,
+  DistBin, RollingVolPoint, PrePostPoint, Streaks, TopEventDay,
+  SpreadByType, CalendarMonth, Summary, EventType,
+} from "./types";
 
 // ── DESIGN TOKENS ─────────────────────────────────────────────
 const C = {
@@ -28,7 +33,7 @@ const C = {
   border: "rgba(0,0,0,0.08)",
 };
 
-const TYPE_META: Record<string, { color: string; label: string; short: string }> = {
+const TYPE_META: Record<EventType, { color: string; label: string; short: string }> = {
   "Fed":            { color: C.blue,    label: "Fed",          short: "FED" },
   "Macro":          { color: C.orange,  label: "Macro",        short: "MCR" },
   "Political":      { color: "#ff6b35", label: "Political",    short: "POL" },
@@ -39,21 +44,21 @@ const TYPE_META: Record<string, { color: string; label: string; short: string }>
   "Geopolitical":   { color: "#8e8e93", label: "Geopolitical", short: "GEO" },
 };
 
+// Derive ticker items from SUMMARY so they never go stale when data refreshes.
+const S = SUMMARY as Summary;
+const VOL_RATIO = (S.vol_event / S.vol_non_event).toFixed(2);
 const TICKER_ITEMS = [
-  "857 Trading Days · Jan 2023–Jun 2026",
-  "81 Annotated Events Across 8 Categories",
-  "Event-Day Volatility 2.55× Normal Sessions",
-  "Best Day: QQQ +12.1% · Apr 9 2025 — Tariff Pause",
-  "Worst Day: QQQ −5.0% · Apr 8 2025 — China 104% Tariff",
+  `${S.total_days} Trading Days · Jan 2023 – Latest Session`,
+  `${S.event_days} Annotated Events Across 8 Categories`,
+  `Event-Day Volatility ${VOL_RATIO}× Normal Sessions`,
+  `Best Day: QQQ +${S.best.qqq.toFixed(1)}% · ${S.best.date} — ${S.best.en ?? ""}`.trim(),
+  `Worst Day: QQQ ${S.worst.qqq.toFixed(1)}% · ${S.worst.date} — ${S.worst.en ?? ""}`.trim(),
   "AI Events: 89% Win Rate · Avg +0.46%",
   "Fed Days: Perfect Coin Flip · 7 Up / 7 Down",
   "Monday is the Best Trading Day · +0.23% Avg",
   "Thursday is the Worst · −0.17% Avg",
-  "2025 Had 2× Higher Volatility Than 2023",
+  "Tech Underperforms on Macro Data Days (QQQ −SPY)",
 ];
-
-// ── TYPES ─────────────────────────────────────────────────────
-type Row = { date: string; qqq: number; spy: number | null; ndx: number | null; et?: string; en?: string; ed?: string };
 
 // ── HELPERS ───────────────────────────────────────────────────
 function pctColor(p: number) {
@@ -178,9 +183,77 @@ export default function MarketEventDashboard() {
   const [page, setPage]               = useState(0);
   const PAGE = 25;
 
-  const rows = ROWS as unknown as Row[];
-  const s = SUMMARY as { total_days:number; event_days:number; avg_all:number; vol_event:number; vol_non_event:number; best:Row; worst:Row; big_moves:number };
-  const streaks = STREAKS as { up:{len:number;start:string;end:string}; down:{len:number;start:string;end:string} };
+  const rows = ROWS as readonly Row[];
+  const s = SUMMARY as Summary;
+  const streaks = STREAKS as Streaks;
+
+  // Typed aliases — one cast each, used everywhere below.
+  const typeStats     = TYPE_STATS     as readonly TypeStat[];
+  const cumThin       = CUM_THIN       as readonly CumPoint[];
+  const byDow         = BY_DOW         as readonly DowStat[];
+  const byMonth       = BY_MONTH       as readonly MonthStat[];
+  const byYear        = BY_YEAR        as readonly YearStat[];
+  const byYm          = BY_YM          as readonly YearMonthStat[];
+  const distribution  = DISTRIBUTION   as readonly DistBin[];
+  const rollingVol    = ROLLING_VOL    as readonly RollingVolPoint[];
+  const prePostWide   = PRE_POST_WIDE  as readonly PrePostPoint[];
+  const topEventDays  = TOP_EVENT_DAYS as readonly TopEventDay[];
+  const spreadByType  = SPREAD_BY_TYPE as readonly SpreadByType[];
+  const calendar      = CALENDAR       as readonly CalendarMonth[];
+
+  // ── Derived analytics (computed once from rows) ─────────────
+  // Drawdown: peak-to-trough on the cumulative open→close curve.
+  // Volatility clustering: identifies consecutive |return| ≥ 1% sessions.
+  const { drawdown, maxDD, clusters, longestCluster, dailyAutocorr } = useMemo(() => {
+    let cum = 0;
+    let peak = 0;
+    let maxDD = 0;
+    let maxDDDate = "";
+    const dd: Array<{ date: string; cum: number; dd: number }> = [];
+
+    for (const r of rows) {
+      cum += r.qqq;
+      if (cum > peak) peak = cum;
+      const drawPct = cum - peak; // negative or zero
+      dd.push({ date: r.date, cum, dd: drawPct });
+      if (drawPct < maxDD) {
+        maxDD = drawPct;
+        maxDDDate = r.date;
+      }
+    }
+
+    // Thin the drawdown series for charting (every ~5th day, plus extreme points).
+    const ddThin = dd.filter((d, i) => i % 5 === 0 || d.dd === maxDD || i === dd.length - 1);
+
+    // Volatility clustering — consecutive |r| ≥ 1% sessions.
+    const clusters: Array<{ start: string; end: string; len: number; sumAbs: number }> = [];
+    let cs: { start: string; end: string; len: number; sumAbs: number } | null = null;
+    for (const r of rows) {
+      if (Math.abs(r.qqq) >= 1) {
+        if (!cs) cs = { start: r.date, end: r.date, len: 1, sumAbs: Math.abs(r.qqq) };
+        else { cs.end = r.date; cs.len += 1; cs.sumAbs += Math.abs(r.qqq); }
+      } else if (cs) {
+        if (cs.len >= 3) clusters.push(cs);
+        cs = null;
+      }
+    }
+    if (cs && cs.len >= 3) clusters.push(cs);
+    clusters.sort((a, b) => b.len - a.len);
+    const longestCluster = clusters[0];
+
+    // Lag-1 autocorrelation of daily QQQ returns — does yesterday predict today?
+    const r = rows.map(x => x.qqq);
+    const mean = r.reduce((a, b) => a + b, 0) / r.length;
+    let num = 0, den = 0;
+    for (let i = 0; i < r.length; i++) {
+      const dev = r[i] - mean;
+      den += dev * dev;
+      if (i > 0) num += dev * (r[i - 1] - mean);
+    }
+    const dailyAutocorr = den === 0 ? 0 : num / den;
+
+    return { drawdown: ddThin, maxDD: { val: maxDD, date: maxDDDate }, clusters, longestCluster, dailyAutocorr };
+  }, [rows]);
 
   // ── Timeline filtered rows ────────────────────────────────
   const filtered = useMemo(() => {
@@ -200,16 +273,16 @@ export default function MarketEventDashboard() {
   const totalPages = Math.ceil(filtered.length / PAGE);
 
   // ── PRE/POST chart: show only 4 types ────────────────────
-  const prePostTypes = ["AI", "Political", "Fed", "Macro"];
+  const prePostTypes: EventType[] = ["AI", "Political", "Fed", "Macro"];
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif" }}>
 
       {/* ════ HERO ════ */}
-      <div style={{ position: "relative", background: "#000", overflow: "hidden" }}>
-        <div className="orb orb-1" />
-        <div className="orb orb-2" />
-        <div className="orb orb-3" />
+      <header style={{ position: "relative", background: "#000", overflow: "hidden" }}>
+        <div className="orb orb-1" aria-hidden="true" />
+        <div className="orb orb-2" aria-hidden="true" />
+        <div className="orb orb-3" aria-hidden="true" />
 
         {/* Ticker */}
         <div className="ticker-wrap" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "10px 0", position: "relative", zIndex: 2 }}>
@@ -233,16 +306,16 @@ export default function MarketEventDashboard() {
             <span className="shimmer-text">Market Event</span> Correlator
           </h1>
           <p style={{ fontSize: 17, color: "#8e8e93", lineHeight: 1.7, maxWidth: 620, marginBottom: 40 }}>
-            857 trading days of QQQ, SPY & NDX open→close returns annotated with{" "}
-            <span style={{ color: "#e5e5ea" }}>81 major market events</span> — Fed decisions, tariff shocks, AI launches, IPOs, earnings, and more. Every correlation, pattern, and causal signal in one place.
+            {s.total_days} trading days of QQQ, SPY & NDX open→close returns annotated with{" "}
+            <span style={{ color: "#e5e5ea" }}>{s.event_days} major market events</span> — Fed decisions, tariff shocks, AI launches, IPOs, earnings, and more. Every correlation, pattern, and causal signal in one place.
           </p>
 
           {/* KPI hero cards */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12, maxWidth: 780 }}>
             {[
-              { badge:"DATASET",   label:"Trading Days",        val:"857",    sub:"Jan 2023 – Jun 2026",             accent: C.blue   },
-              { badge:"INSIGHT",   label:"Event-Day Volatility", val:"2.55×",  sub:"vs normal days (σ 2.15% vs 0.84%)", accent: C.green  },
-              { badge:"RECORD",    label:"Best Single Day",      val:"+12.1%", sub:"Apr 9 2025 — 90-day tariff pause", accent: C.cyan   },
+              { badge:"DATASET",   label:"Trading Days",        val:String(s.total_days),    sub:"Jan 2023 – Latest Session",             accent: C.blue   },
+              { badge:"INSIGHT",   label:"Event-Day Volatility", val:`${(s.vol_event/s.vol_non_event).toFixed(2)}×`,  sub:`vs normal days (σ ${s.vol_event.toFixed(2)}% vs ${s.vol_non_event.toFixed(2)}%)`, accent: C.green  },
+              { badge:"RECORD",    label:"Best Single Day",      val:`+${s.best.qqq.toFixed(1)}%`, sub:`${fmtDate(s.best.date)} — ${s.best.en?.slice(0,30) ?? ""}`, accent: C.cyan   },
               { badge:"EDGE",      label:"Monday vs Thursday",   val:"+0.40%", sub:"best vs worst day of week spread", accent: C.orange },
             ].map(k => (
               <div key={k.label} style={{
@@ -271,27 +344,32 @@ export default function MarketEventDashboard() {
             ))}
           </div>
         </div>
-      </div>
+      </header>
 
       {/* ════ STICKY NAV ════ */}
-      <div className="nav-glass" style={{ position:"sticky", top:0, zIndex:50 }}>
+      <nav className="nav-glass" aria-label="Dashboard sections" style={{ position:"sticky", top:0, zIndex:50 }}>
         <div style={{ maxWidth:1140, margin:"0 auto", padding:"0 24px", display:"flex", alignItems:"center", gap:4, height:52, overflowX:"auto" }}>
           {SECTIONS.map(sec => (
-            <button key={sec} onClick={() => document.getElementById(`section-${sec.toLowerCase().replace(" ","-")}`)?.scrollIntoView({behavior:"smooth",block:"start"})} style={{
-              color: "#8e8e93",
-              background: "transparent",
-              border:"none", padding:"5px 14px", borderRadius:20, fontSize:12,
-              fontWeight:600, letterSpacing:"0.02em", cursor:"pointer",
-              fontFamily:"inherit", whiteSpace:"nowrap", transition:"all 0.15s",
-            }}
-            onMouseEnter={e=>(e.currentTarget.style.color="#f5f5f7")}
-            onMouseLeave={e=>(e.currentTarget.style.color="#8e8e93")}
+            <button
+              key={sec}
+              type="button"
+              aria-label={`Jump to ${sec} section`}
+              onClick={() => document.getElementById(`section-${sec.toLowerCase().replace(" ","-")}`)?.scrollIntoView({behavior:"smooth",block:"start"})}
+              style={{
+                color: "#8e8e93",
+                background: "transparent",
+                border:"none", padding:"5px 14px", borderRadius:20, fontSize:12,
+                fontWeight:600, letterSpacing:"0.02em", cursor:"pointer",
+                fontFamily:"inherit", whiteSpace:"nowrap", transition:"all 0.15s",
+              }}
+              onMouseEnter={e=>(e.currentTarget.style.color="#f5f5f7")}
+              onMouseLeave={e=>(e.currentTarget.style.color="#8e8e93")}
             >{sec}</button>
           ))}
           <div style={{ flex:1 }} />
-          <span style={{ fontSize:11, color:"#6e6e73", whiteSpace:"nowrap" }}>QQQ · SPY · NDX · 2023–2026</span>
+          <span style={{ fontSize:11, color:"#6e6e73", whiteSpace:"nowrap" }}>QQQ · SPY · NDX · 2023–{(rows.at(-1)?.date ?? "2026").slice(0,4)}</span>
         </div>
-      </div>
+      </nav>
 
       {/* ════ MAIN CONTENT ════ */}
       <div id="dash-content" style={{ maxWidth:1140, margin:"0 auto", padding:"32px 24px 100px", display:"flex", flexDirection:"column", gap:60 }}>
@@ -317,10 +395,10 @@ export default function MarketEventDashboard() {
             <Card accent={C.blue} style={{ padding:24 }}>
               <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Cumulative Open→Close Return: QQQ vs SPY</div>
               <div style={{ fontSize:13, color:C.dim, marginBottom:20, lineHeight:1.5 }}>
-                Sum of daily open-to-close returns since Jan 2, 2023. Not total return (excludes overnight gaps & dividends) — measures pure intraday directional alpha. QQQ has accumulated <span style={{ color:C.blue, fontWeight:700 }}>{fmtPct((CUM_THIN as Array<{qqq:number}>).at(-1)?.qqq ?? 0, 1)}</span> of intraday gains vs SPY&apos;s <span style={{ color:C.orange, fontWeight:700 }}>{fmtPct((CUM_THIN as Array<{spy:number}>).at(-1)?.spy ?? 0, 1)}</span>.
+                Sum of daily open-to-close returns since Jan 2, 2023. Not total return (excludes overnight gaps & dividends) — measures pure intraday directional alpha. QQQ has accumulated <span style={{ color:C.blue, fontWeight:700 }}>{fmtPct(cumThin.at(-1)?.qqq ?? 0, 1)}</span> of intraday gains vs SPY&apos;s <span style={{ color:C.orange, fontWeight:700 }}>{fmtPct(cumThin.at(-1)?.spy ?? 0, 1)}</span>.
               </div>
               <ChartWrap height={280}>
-                <LineChart data={CUM_THIN as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                <LineChart data={[...cumThin]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="date" tick={{ fill:C.dim, fontSize:10 }} tickFormatter={v => v.slice(2,7).replace("-","'")} interval={29} />
                   <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v,0)} />
@@ -334,6 +412,31 @@ export default function MarketEventDashboard() {
               </ChartWrap>
             </Card>
 
+            {/* NEW: Drawdown Curve — running underwater chart */}
+            <Card accent={C.red} style={{ padding:24 }}>
+              <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>QQQ Open→Close Drawdown Curve</div>
+              <div style={{ fontSize:13, color:C.dim, marginBottom:20, lineHeight:1.5 }}>
+                Distance from the rolling all-time-high on the cumulative open→close curve. Stays at 0 during new highs, slides negative during corrections. Deepest underwater: <span style={{ color:C.red, fontWeight:700 }}>{fmtPct(maxDD.val, 1)}</span> on <span className="mono" style={{ color:C.text, fontWeight:700 }}>{fmtDate(maxDD.date)}</span> — the bottom of the April 2025 tariff shock sequence.
+              </div>
+              <ChartWrap height={220}>
+                <AreaChart data={drawdown} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                  <defs>
+                    <linearGradient id="ddFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={C.red} stopOpacity={0.05} />
+                      <stop offset="100%" stopColor={C.red} stopOpacity={0.45} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
+                  <XAxis dataKey="date" tick={{ fill:C.dim, fontSize:10 }} tickFormatter={v => v.slice(2,7).replace("-","'")} interval={29} />
+                  <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v,0)} />
+                  <Tooltip {...CHART_TOOLTIP} labelFormatter={v=>`Date: ${v}`}
+                    formatter={(v:unknown) => [fmtPct(v as number, 2), "Drawdown from peak"]} />
+                  <ReferenceLine y={0} stroke={C.dim} strokeWidth={1} />
+                  <Area type="monotone" dataKey="dd" stroke={C.red} strokeWidth={2} fill="url(#ddFill)" />
+                </AreaChart>
+              </ChartWrap>
+            </Card>
+
             {/* Distribution + Streaks */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }} className="two-col">
 
@@ -342,13 +445,13 @@ export default function MarketEventDashboard() {
                 <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Daily Return Distribution</div>
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>Histogram of QQQ open→close returns across all 857 sessions. The market is modestly positively skewed — more large-up days than large-down days, but the fat left tail hits harder.</div>
                 <ChartWrap height={220}>
-                  <BarChart data={DISTRIBUTION as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                  <BarChart data={[...distribution]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="range" tick={{ fill:C.dim, fontSize:10 }} />
                     <YAxis tick={{ fill:C.dim, fontSize:11 }} label={{ value:"Days", angle:-90, position:"insideLeft", fill:C.dim, fontSize:11 }} />
                     <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown) => [v as number, "Trading Days"]} />
                     <Bar dataKey="count" radius={[4,4,0,0]}>
-                      {(DISTRIBUTION as Array<{range:string;count:number}>).map(b => (
+                      {distribution.map(b => (
                         <Cell key={b.range} fill={b.range.startsWith(">") || b.range.startsWith("0") || b.range.startsWith("1") || b.range.startsWith("2") || b.range.startsWith("3") ? C.green : C.red} fillOpacity={0.82} />
                       ))}
                     </Bar>
@@ -388,12 +491,12 @@ export default function MarketEventDashboard() {
                   <thead>
                     <tr style={{ borderBottom:"1px solid rgba(0,0,0,0.08)" }}>
                       {["Year","Days","Avg Daily","Volatility","Win Rate","Best Day","Worst Day"].map(h=>(
-                        <th key={h} style={{ padding:"10px 20px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.08em", whiteSpace:"nowrap" }}>{h}</th>
+                        <th key={h} scope="col" style={{ padding:"10px 20px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.08em", whiteSpace:"nowrap" }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {(BY_YEAR as Array<{year:string;avg:number;vol:number;count:number;up:number;down:number;best:number;worst:number}>).map((y,i) => (
+                    {byYear.map((y,i) => (
                       <tr key={y.year} className="tr-hover" style={{ borderBottom:"1px solid rgba(0,0,0,0.04)", background: i%2===0?"transparent":"rgba(0,0,0,0.01)" }}>
                         <td style={{ padding:"11px 20px", fontWeight:800, fontSize:14 }}>{y.year}</td>
                         <td className="mono" style={{ padding:"11px 20px", color:C.dim }}>{y.count}</td>
@@ -423,21 +526,21 @@ export default function MarketEventDashboard() {
                   Monday leads by a wide margin (+0.23%). Thursday is the only day averaging negative returns (−0.17%). The Mon–Thu spread is the most reliable day-of-week edge in the dataset.
                 </div>
                 <ChartWrap height={200}>
-                  <BarChart data={BY_DOW as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                  <BarChart data={[...byDow]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="day" tick={{ fill:C.dim, fontSize:12 }} />
                     <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v,2)} />
                     <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown) => [fmtPct(v as number,4), "Avg QQQ Return"]} />
                     <ReferenceLine y={0} stroke={C.dim} strokeWidth={1} />
                     <Bar dataKey="avg" radius={[5,5,0,0]}>
-                      {(BY_DOW as Array<{day:string;avg:number}>).map(d => (
+                      {byDow.map(d => (
                         <Cell key={d.day} fill={d.avg>=0?C.blue:C.red} fillOpacity={d.day==="Mon"?0.95:d.day==="Thu"?0.95:0.65} />
                       ))}
                     </Bar>
                   </BarChart>
                 </ChartWrap>
                 <div style={{ marginTop:16, display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6 }}>
-                  {(BY_DOW as Array<{day:string;avg:number;up:number;count:number;vol:number}>).map(d => (
+                  {byDow.map(d => (
                     <div key={d.day} style={{ textAlign:"center", background:"rgba(0,0,0,0.03)", borderRadius:8, padding:"8px 4px" }}>
                       <div style={{ fontSize:11, fontWeight:700, color:C.dim }}>{d.day}</div>
                       <div className="mono" style={{ fontSize:13, fontWeight:800, color:d.avg>=0?C.green:C.red }}>{fmtPct(d.avg,2)}</div>
@@ -453,14 +556,14 @@ export default function MarketEventDashboard() {
                   Across 2023–2026. January, March, and October lead. September and December lag — driven by FOMC surprises and year-end tax-loss selling respectively.
                 </div>
                 <ChartWrap height={200}>
-                  <BarChart data={BY_MONTH as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                  <BarChart data={[...byMonth]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="month" tick={{ fill:C.dim, fontSize:10 }} />
                     <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v,2)} />
                     <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown) => [fmtPct(v as number,4), "Avg QQQ Return"]} />
                     <ReferenceLine y={0} stroke={C.dim} strokeWidth={1} />
                     <Bar dataKey="avg" radius={[4,4,0,0]}>
-                      {(BY_MONTH as Array<{month:string;avg:number}>).map(m => (
+                      {byMonth.map(m => (
                         <Cell key={m.month} fill={m.avg>=0?C.cyan:C.red} fillOpacity={0.85} />
                       ))}
                     </Bar>
@@ -476,7 +579,7 @@ export default function MarketEventDashboard() {
               <div style={{ position:"relative" }}>
               <div style={WM_STYLE}>@Trace_Cohen · t@nyvp.com</div>
               <div style={{ display:"flex", flexWrap:"wrap", gap:16 }}>
-                {(CALENDAR as Array<{ym:string;days:Array<{date:string;qqq:number;et?:string;en?:string}>}>).map(({ ym, days }) => (
+                {calendar.map(({ ym, days }) => (
                   <div key={ym} style={{ minWidth:0 }}>
                     <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:"0.06em", marginBottom:5 }}>{ym.slice(5,7)}/{ym.slice(2,4)}</div>
                     <div style={{ display:"flex", flexWrap:"wrap", gap:2 }}>
@@ -518,19 +621,19 @@ export default function MarketEventDashboard() {
               <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Monthly Average Daily Return — Year × Month Grid</div>
               <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>Avg daily QQQ return per calendar month. Quickly spot which months in which years drove or hurt performance.</div>
               {(() => {
-                const years = Array.from(new Set((BY_YM as Array<{year:string}>).map(r => r.year))).sort();
+                const years = Array.from(new Set(byYm.map(r => r.year))).sort();
 
                 const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-                const ym_map = Object.fromEntries((BY_YM as Array<{ym:string;avg:number;count:number}>).map(r => [r.ym, r]));
+                const ym_map: Record<string, YearMonthStat> = Object.fromEntries(byYm.map(r => [r.ym, r]));
                 return (
                   <div style={{ overflowX:"auto", position:"relative" }}>
                   <div style={WM_STYLE}>@Trace_Cohen · t@nyvp.com</div>
                     <table style={{ borderCollapse:"collapse", fontSize:12, width:"100%" }}>
                       <thead>
                         <tr>
-                          <th style={{ padding:"6px 12px", textAlign:"left", color:C.dim, fontSize:10, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em" }}>Year</th>
+                          <th scope="col" style={{ padding:"6px 12px", textAlign:"left", color:C.dim, fontSize:10, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em" }}>Year</th>
                           {months.map(m=>(
-                            <th key={m} style={{ padding:"6px 10px", textAlign:"center", color:C.dim, fontSize:10, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>{m}</th>
+                            <th key={m} scope="col" style={{ padding:"6px 10px", textAlign:"center", color:C.dim, fontSize:10, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>{m}</th>
                           ))}
                         </tr>
                       </thead>
@@ -571,14 +674,14 @@ export default function MarketEventDashboard() {
                 <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Avg QQQ Return by Event Type</div>
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>AI and Banking Crisis events are surprisingly bullish on average. Macro data and Geopolitical events are the most reliably negative catalysts for QQQ.</div>
                 <ChartWrap height={220}>
-                  <BarChart data={[...TYPE_STATS as object[]].sort((a:object,b:object)=>(b as {avg:number}).avg-(a as {avg:number}).avg)} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                  <BarChart data={[...typeStats].sort((a,b)=>b.avg-a.avg)} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="type" tick={{ fill:C.dim, fontSize:10 }} />
                     <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v,2)} />
                     <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown) => [fmtPct(v as number,3), "Avg QQQ Return"]} />
                     <ReferenceLine y={0} stroke={C.dim} strokeWidth={1} />
                     <Bar dataKey="avg" radius={[5,5,0,0]}>
-                      {([...TYPE_STATS as Array<{type:string;avg:number}>].sort((a,b)=>b.avg-a.avg)).map(ts=>(
+                      {[...typeStats].sort((a,b)=>b.avg-a.avg).map(ts=>(
                         <Cell key={ts.type} fill={ts.avg>=0?(TYPE_META[ts.type]?.color??C.blue):C.red} fillOpacity={0.85} />
                       ))}
                     </Bar>
@@ -593,12 +696,12 @@ export default function MarketEventDashboard() {
                     <thead>
                       <tr style={{ borderBottom:"1px solid rgba(0,0,0,0.08)" }}>
                         {["Type","Events","Avg Return","Win Rate","Volatility σ"].map(h=>(
-                          <th key={h} style={{ padding:"9px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
+                          <th key={h} scope="col" style={{ padding:"9px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {([...TYPE_STATS as Array<{type:string;avg:number;count:number;up:number;down:number;vol:number}>].sort((a,b)=>b.avg-a.avg)).map((ts,i)=>{
+                      {[...typeStats].sort((a,b)=>b.avg-a.avg).map((ts,i)=>{
                         const m = TYPE_META[ts.type];
                         const wr = (ts.up/ts.count)*100;
                         return (
@@ -626,7 +729,7 @@ export default function MarketEventDashboard() {
                 Average QQQ return in the days surrounding key event types. AI events show persistent positive drift after D0. Political (tariff) events show the sharpest D0 spike, then mean-reversion. Macro events show weakness before and after.
               </div>
               <ChartWrap height={240}>
-                <ComposedChart data={PRE_POST_WIDE as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                <ComposedChart data={[...prePostWide]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="day" tick={{ fill:C.dim, fontSize:12 }} />
                   <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v,2)} />
@@ -648,14 +751,14 @@ export default function MarketEventDashboard() {
                 Positive spread = tech (QQQ) outperformed the broad market (SPY). AI and Earnings events drive the strongest tech outperformance. Macro and Geopolitical events trigger rotation away from tech into defensives, closing the spread.
               </div>
               <ChartWrap height={200}>
-                <BarChart data={SPREAD_BY_TYPE as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                <BarChart data={[...spreadByType]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="type" tick={{ fill:C.dim, fontSize:10 }} />
                   <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v,2)} />
                   <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown) => [fmtPct(v as number,3), "QQQ−SPY Spread"]} />
                   <ReferenceLine y={0} stroke={C.dim} strokeWidth={1} />
                   <Bar dataKey="avg" radius={[5,5,0,0]}>
-                    {(SPREAD_BY_TYPE as Array<{type:string;avg:number}>).map(d=>(
+                    {spreadByType.map(d=>(
                       <Cell key={d.type} fill={d.avg>=0?(TYPE_META[d.type]?.color??C.blue):C.red} fillOpacity={0.82} />
                     ))}
                   </Bar>
@@ -671,12 +774,12 @@ export default function MarketEventDashboard() {
                   <thead>
                     <tr style={{ borderBottom:"1px solid rgba(0,0,0,0.08)" }}>
                       {["#","Date","QQQ","SPY","Type","Event"].map(h=>(
-                        <th key={h} style={{ padding:"10px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
+                        <th key={h} scope="col" style={{ padding:"10px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {(TOP_EVENT_DAYS as Array<{date:string;qqq:number;spy:number|null;et:string;en:string;ed:string}>).map((r,i)=>{
+                    {topEventDays.map((r,i)=>{
                       const m = TYPE_META[r.et];
                       return (
                         <tr key={r.date} className="tr-hover" style={{ borderBottom:"1px solid rgba(0,0,0,0.04)", background:i%2===0?"transparent":"rgba(0,0,0,0.01)", borderLeft:`3px solid ${m?.color??C.dim}` }}>
@@ -735,7 +838,7 @@ export default function MarketEventDashboard() {
                       <thead>
                         <tr style={{ borderBottom:"1px solid rgba(0,0,0,0.08)" }}>
                           {["#","Date","QQQ","SPY","What Actually Happened"].map(h=>(
-                            <th key={h} style={{ padding:"9px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
+                            <th key={h} scope="col" style={{ padding:"9px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
                           ))}
                         </tr>
                       </thead>
@@ -848,7 +951,7 @@ export default function MarketEventDashboard() {
                 Annualized volatility computed from daily open→close returns over a 30-day rolling window. Spikes correspond directly to tariff shock weeks (April 2025), Japan carry-trade unwind (August 2024), and DeepSeek (January 2025). The 2023 baseline ≈ 12–15% annualized; April 2025 peak exceeded 50%.
               </div>
               <ChartWrap height={260}>
-                <LineChart data={ROLLING_VOL as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                <LineChart data={[...rollingVol]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                   <XAxis dataKey="date" tick={{ fill:C.dim, fontSize:10 }} tickFormatter={v => (v as string).slice(2,7).replace("-","'")} interval={39} />
                   <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => `${v}%`} />
@@ -862,11 +965,11 @@ export default function MarketEventDashboard() {
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }} className="two-col">
               <Card accent={C.cyan} style={{ padding:24 }}>
                 <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Volatility on Event vs Normal Days</div>
-                <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>2.55× — the core quantitative finding of this entire dataset.</div>
+                <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>{(s.vol_event/s.vol_non_event).toFixed(2)}× — the core quantitative finding of this entire dataset.</div>
                 <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
                   {[
-                    { label:"Event Days (89 sessions)", vol: s.vol_event, color:C.orange, n:s.event_days, pct:"9.5%" },
-                    { label:"Non-Event Days (768 sessions)", vol:s.vol_non_event, color:C.blue, n:s.total_days - s.event_days, pct:"90.5%" },
+                    { label:`Event Days (${s.event_days} sessions)`, vol: s.vol_event, color:C.orange, n:s.event_days, pct:`${((s.event_days/s.total_days)*100).toFixed(1)}%` },
+                    { label:`Non-Event Days (${s.total_days - s.event_days} sessions)`, vol:s.vol_non_event, color:C.blue, n:s.total_days - s.event_days, pct:`${(((s.total_days-s.event_days)/s.total_days)*100).toFixed(1)}%` },
                   ].map(v=>(
                     <div key={v.label} style={{ background:"rgba(0,0,0,0.03)", borderRadius:12, padding:"16px 18px" }}>
                       <div style={{ display:"flex", justifyContent:"space-between", marginBottom:10 }}>
@@ -888,20 +991,20 @@ export default function MarketEventDashboard() {
                 <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Annual Volatility Comparison</div>
                 <div style={{ fontSize:13, color:C.dim, marginBottom:20 }}>2025 was twice as volatile as 2023 — driven almost entirely by the tariff shock sequence in April. Without April 2025, 2025 vol would have been roughly in line with 2024.</div>
                 <ChartWrap height={180}>
-                  <BarChart data={BY_YEAR as object[]} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                  <BarChart data={[...byYear]} margin={{ top:4, right:8, bottom:4, left:8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
                     <XAxis dataKey="year" tick={{ fill:C.dim, fontSize:12 }} />
                     <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v=>`${v}%`} />
                     <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown)=>[`${(v as number).toFixed(3)}%`, "Daily Vol σ"]} />
                     <Bar dataKey="vol" radius={[5,5,0,0]}>
-                      {(BY_YEAR as Array<{year:string;vol:number}>).map(y=>(
+                      {byYear.map(y=>(
                         <Cell key={y.year} fill={y.vol>1?C.red:y.vol>0.9?C.orange:C.blue} fillOpacity={0.85} />
                       ))}
                     </Bar>
                   </BarChart>
                 </ChartWrap>
                 <div style={{ marginTop:12, display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8 }}>
-                  {(BY_YEAR as Array<{year:string;avg:number;vol:number;up:number;count:number}>).map(y=>(
+                  {byYear.map(y=>(
                     <div key={y.year} style={{ textAlign:"center", background:"rgba(0,0,0,0.03)", borderRadius:8, padding:"8px 6px" }}>
                       <div style={{ fontSize:11, fontWeight:700, color:C.dim }}>{y.year}</div>
                       <div className="mono" style={{ fontSize:11, fontWeight:700, color:y.vol>1?C.red:C.dim }}>σ {y.vol.toFixed(2)}%</div>
@@ -912,6 +1015,63 @@ export default function MarketEventDashboard() {
               </Card>
             </div>
 
+            {/* NEW: Volatility Clustering — consecutive |QQQ| ≥ 1% sessions */}
+            <Card accent={C.red} style={{ overflow:"hidden" }}>
+              <CardHeader
+                title="Volatility Clustering — Stretches of Consecutive ±1%+ Sessions"
+                sub="Big-move days arrive in waves. These are every run of 3+ back-to-back trading days where QQQ moved at least 1% in either direction — a direct measure of volatility regime persistence."
+              />
+              <div style={{ padding:"14px 24px 8px", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:12, borderBottom:"1px solid rgba(0,0,0,0.06)" }}>
+                <div>
+                  <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:"0.08em" }}>CLUSTERS FOUND</div>
+                  <div className="mono" style={{ fontSize:22, fontWeight:800, color:C.red }}>{clusters.length}</div>
+                  <div style={{ fontSize:11, color:C.faint }}>runs of 3+ consecutive big-move days</div>
+                </div>
+                <div>
+                  <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:"0.08em" }}>LONGEST RUN</div>
+                  <div className="mono" style={{ fontSize:22, fontWeight:800, color:C.orange }}>{longestCluster?.len ?? 0} days</div>
+                  <div style={{ fontSize:11, color:C.faint }}>
+                    {longestCluster ? `${fmtDate(longestCluster.start)} → ${fmtDate(longestCluster.end)}` : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:"0.08em" }}>LAG-1 AUTOCORRELATION</div>
+                  <div className="mono" style={{ fontSize:22, fontWeight:800, color: Math.abs(dailyAutocorr) > 0.05 ? C.orange : C.dim }}>
+                    {dailyAutocorr >= 0 ? "+" : ""}{dailyAutocorr.toFixed(3)}
+                  </div>
+                  <div style={{ fontSize:11, color:C.faint }}>does yesterday predict today?</div>
+                </div>
+              </div>
+              <div style={{ overflowX:"auto" }}>
+                <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                  <thead>
+                    <tr style={{ borderBottom:"1px solid rgba(0,0,0,0.08)" }}>
+                      {["#","Start","End","Length","Cumulative |Move|","Avg Per Day"].map(h=>(
+                        <th key={h} scope="col" style={{ padding:"9px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", whiteSpace:"nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {clusters.slice(0,10).map((c,i)=>(
+                      <tr key={c.start} className="tr-hover" style={{ borderBottom:"1px solid rgba(0,0,0,0.04)", background:i%2===0?"transparent":"rgba(0,0,0,0.01)" }}>
+                        <td className="mono" style={{ padding:"10px 16px", color:C.faint, fontSize:11 }}>{i+1}</td>
+                        <td className="mono" style={{ padding:"10px 16px", color:C.dim, whiteSpace:"nowrap" }}>{fmtDate(c.start)}</td>
+                        <td className="mono" style={{ padding:"10px 16px", color:C.dim, whiteSpace:"nowrap" }}>{fmtDate(c.end)}</td>
+                        <td className="mono" style={{ padding:"10px 16px", fontWeight:800, color:c.len>=6?C.red:c.len>=4?C.orange:C.text }}>{c.len} days</td>
+                        <td className="mono" style={{ padding:"10px 16px", color:C.text }}>{c.sumAbs.toFixed(2)}%</td>
+                        <td className="mono" style={{ padding:"10px 16px", color:C.dim }}>{(c.sumAbs / c.len).toFixed(2)}% / day</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ padding:"14px 24px 18px", fontSize:12, color:C.dim, lineHeight:1.6 }}>
+                {Math.abs(dailyAutocorr) < 0.05
+                  ? "Daily returns are essentially uncorrelated day-to-day (|ρ| < 0.05) — yesterday's direction tells you almost nothing about today's. But volatility magnitude clusters strongly: once the market enters a high-vol regime, expect the next several sessions to also be loud."
+                  : `Lag-1 autocorrelation is ${dailyAutocorr.toFixed(3)} — modest but non-zero. Directional momentum is weak; volatility clustering is the dominant pattern.`}
+              </div>
+            </Card>
+
         </div>
 
         <div id="section-timeline" style={{ display:"flex", flexDirection:"column", gap:0 }}>
@@ -919,9 +1079,9 @@ export default function MarketEventDashboard() {
           <div style={{ marginBottom:16 }} />
             {/* Filters */}
             <Card style={{ padding:"16px 20px", marginBottom:16, borderTop:`2px solid ${C.blue}` }}>
-              <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+              <div role="group" aria-label="Timeline filters" style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
                 {["ALL","2026","2025","2024","2023"].map(y=>(
-                  <button key={y} onClick={()=>{setYearFilter(y);setPage(0);}} style={{
+                  <button key={y} type="button" aria-pressed={yearFilter===y} aria-label={`Filter to year ${y}`} onClick={()=>{setYearFilter(y);setPage(0);}} style={{
                     padding:"5px 12px", borderRadius:20,
                     border:`1px solid ${yearFilter===y?C.blue:"rgba(0,0,0,0.12)"}`,
                     background: yearFilter===y ? C.blue+"12":"transparent",
@@ -929,33 +1089,34 @@ export default function MarketEventDashboard() {
                     fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
                   }}>{y}</button>
                 ))}
-                <div style={{ width:1, height:20, background:"rgba(0,0,0,0.1)", margin:"0 4px" }} />
-                {Object.entries(TYPE_META).map(([et,m])=>(
-                  <button key={et} onClick={()=>{setEvTypeFilter(evTypeFilter===et?"ALL":et);setPage(0);}} style={{
+                <div aria-hidden="true" style={{ width:1, height:20, background:"rgba(0,0,0,0.1)", margin:"0 4px" }} />
+                {(Object.entries(TYPE_META) as Array<[EventType, typeof TYPE_META[EventType]]>).map(([et,m])=>(
+                  <button key={et} type="button" aria-pressed={evTypeFilter===et} aria-label={`Filter by event type ${m.label}`} onClick={()=>{setEvTypeFilter(evTypeFilter===et?"ALL":et);setPage(0);}} style={{
                     padding:"4px 10px", borderRadius:20, fontSize:11,
                     border:`1px solid ${evTypeFilter===et?m.color:"rgba(0,0,0,0.10)"}`,
                     background: evTypeFilter===et?m.color+"12":"transparent",
                     color: evTypeFilter===et?m.color:C.dim, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
                   }}>{m.label}</button>
                 ))}
-                <div style={{ width:1, height:20, background:"rgba(0,0,0,0.1)", margin:"0 4px" }} />
-                <button onClick={()=>{setEvOnly(!evOnly);setPage(0);}} style={{
+                <div aria-hidden="true" style={{ width:1, height:20, background:"rgba(0,0,0,0.1)", margin:"0 4px" }} />
+                <button type="button" aria-pressed={evOnly} onClick={()=>{setEvOnly(!evOnly);setPage(0);}} style={{
                   padding:"5px 12px", borderRadius:20, fontSize:12, fontWeight:600,
                   border:`1px solid ${evOnly?C.blue:"rgba(0,0,0,0.12)"}`,
                   background:evOnly?C.blue+"12":"transparent",
                   color:evOnly?C.blue:C.dim, cursor:"pointer", fontFamily:"inherit",
                 }}>Events Only</button>
-                <button onClick={()=>{setExtremeOnly(!extremeOnly);setPage(0);}} style={{
+                <button type="button" aria-pressed={extremeOnly} onClick={()=>{setExtremeOnly(!extremeOnly);setPage(0);}} style={{
                   padding:"5px 12px", borderRadius:20, fontSize:12, fontWeight:600,
                   border:`1px solid ${extremeOnly?C.red:"rgba(0,0,0,0.12)"}`,
                   background:extremeOnly?C.red+"12":"transparent",
                   color:extremeOnly?C.red:C.dim, cursor:"pointer", fontFamily:"inherit",
                 }}>±2%+ Only</button>
-                <input placeholder="Search date or event…" value={search} onChange={e=>{setSearch(e.target.value);setPage(0);}} style={{
+                <label htmlFor="timeline-search" style={{ position:"absolute", width:1, height:1, overflow:"hidden", clip:"rect(0 0 0 0)" }}>Search timeline by date or event</label>
+                <input id="timeline-search" type="search" placeholder="Search date or event…" value={search} onChange={e=>{setSearch(e.target.value);setPage(0);}} aria-label="Search timeline by date or event" style={{
                   padding:"5px 12px", borderRadius:20, border:"1px solid rgba(0,0,0,0.12)",
                   fontSize:12, outline:"none", fontFamily:"inherit", color:C.text, background:"#f5f5f7", width:200,
                 }} />
-                <div style={{ marginLeft:"auto", fontSize:12, color:C.dim, fontWeight:600 }}>{filtered.length} days</div>
+                <div aria-live="polite" style={{ marginLeft:"auto", fontSize:12, color:C.dim, fontWeight:600 }}>{filtered.length} days</div>
               </div>
             </Card>
 
@@ -965,7 +1126,7 @@ export default function MarketEventDashboard() {
                 <thead>
                   <tr style={{ borderBottom:"1px solid rgba(0,0,0,0.08)" }}>
                     {["Date","Event Type","QQQ","SPY","NDX","QQQ−SPY","Event"].map(h=>(
-                      <th key={h} style={{ padding:"10px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.08em", whiteSpace:"nowrap" }}>{h}</th>
+                      <th key={h} scope="col" style={{ padding:"10px 16px", textAlign:"left", color:C.dim, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:"0.08em", whiteSpace:"nowrap" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -1024,17 +1185,17 @@ export default function MarketEventDashboard() {
         </div>
 
         {/* Footer */}
-        <div style={{ marginTop:48, paddingTop:24, borderTop:"1px solid rgba(0,0,0,0.08)", display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
-          <div style={{ fontSize:11, color:C.faint }}>Data: Yahoo Finance · Open→Close intraday return · Not adjusted for dividends or overnight gaps · For informational use only</div>
+        <footer style={{ marginTop:48, paddingTop:24, borderTop:"1px solid rgba(0,0,0,0.08)", display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
+          <div style={{ fontSize:11, color:C.faint }}>Data: Yahoo Finance · Open→Close intraday return · Not adjusted for dividends or overnight gaps · For informational use only · <a href="/api/data" style={{ color:C.blue, textDecoration:"none" }}>JSON API</a></div>
           <div style={{ display:"flex", gap:20, alignItems:"center" }}>
             <a href="https://x.com/Trace_Cohen" target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:C.dim, textDecoration:"none", fontWeight:600 }}>@Trace_Cohen</a>
             <a href="mailto:t@nyvp.com" style={{ fontSize:12, color:C.dim, textDecoration:"none", fontWeight:600 }}>t@nyvp.com</a>
           </div>
-        </div>
+        </footer>
       </div>
 
       {/* Scroll to top */}
-      <button onClick={()=>window.scrollTo({top:0,behavior:"smooth"})} style={{
+      <button type="button" aria-label="Scroll to top of page" onClick={()=>window.scrollTo({top:0,behavior:"smooth"})} style={{
         position:"fixed", bottom:28, right:28, zIndex:100,
         width:42, height:42, borderRadius:"50%",
         background:C.blue, border:"none", cursor:"pointer",
@@ -1046,7 +1207,7 @@ export default function MarketEventDashboard() {
       onMouseEnter={e=>(e.currentTarget.style.transform="scale(1.1)")}
       onMouseLeave={e=>(e.currentTarget.style.transform="scale(1)")}
       title="Back to top"
-      >↑</button>
+      ><span aria-hidden="true">↑</span></button>
 
       <style>{`
         * { box-sizing:border-box; }
