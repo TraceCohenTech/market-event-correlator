@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, ComposedChart, Area, AreaChart,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -32,6 +32,19 @@ const C = {
   card:   "#ffffff",
   border: "rgba(0,0,0,0.08)",
 };
+
+// High-contrast palette used by the Event Anatomy lines and other multi-series
+// overlays. No purple — uses teal in place of any violet hue.
+const ANATOMY_PALETTE = [
+  "#00d4ff", // cyan
+  "#3b82f6", // blue
+  "#22c55e", // green
+  "#f59e0b", // amber
+  "#ef4444", // red
+  "#f97316", // orange
+  "#06b6d4", // teal
+  "#10b981", // emerald
+];
 
 const TYPE_META: Record<EventType, { color: string; label: string; short: string }> = {
   "Fed":            { color: C.blue,    label: "Fed",          short: "FED" },
@@ -173,6 +186,58 @@ const UNEXPLAINED_DRIVERS: Record<string, string> = {
 
 const SECTIONS = ["Overview", "Time Patterns", "Event Intel", "Trends", "Timeline"] as const;
 
+// ── ANIMATION: scroll-triggered reveal ─────────────────────────
+function useInView<T extends HTMLElement>(): [React.RefObject<T>, boolean] {
+  const ref = useRef<T>(null);
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setInView(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      entries => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            setInView(true);
+            obs.disconnect();
+            break;
+          }
+        }
+      },
+      { threshold: 0.08, rootMargin: "0px 0px -40px 0px" }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  return [ref, inView];
+}
+
+function AnimatedSection({
+  id, children, style,
+}: { id: string; children: React.ReactNode; style?: React.CSSProperties }) {
+  const [ref, inView] = useInView<HTMLDivElement>();
+  return (
+    <div
+      id={id}
+      ref={ref}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 20,
+        opacity: inView ? 1 : 0,
+        transform: inView ? "translateY(0)" : "translateY(24px)",
+        transition: "opacity 500ms ease, transform 500ms ease",
+        ...style,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 // ── COMPONENT ─────────────────────────────────────────────────
 export default function MarketEventDashboard() {
   const [yearFilter, setYearFilter]   = useState("ALL");
@@ -182,6 +247,13 @@ export default function MarketEventDashboard() {
   const [search, setSearch]           = useState("");
   const [page, setPage]               = useState(0);
   const PAGE = 25;
+
+  // ── Entrance animation: hero KPI cards slide-up + fade ───────
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    const t = window.setTimeout(() => setMounted(true), 40);
+    return () => window.clearTimeout(t);
+  }, []);
 
   const rows = ROWS as readonly Row[];
   const s = SUMMARY as Summary;
@@ -275,6 +347,147 @@ export default function MarketEventDashboard() {
   // ── PRE/POST chart: show only 4 types ────────────────────
   const prePostTypes: EventType[] = ["AI", "Political", "Fed", "Macro"];
 
+  // ── Event Anatomy state ───────────────────────────────────
+  const ANATOMY_PRE = 5;
+  const ANATOMY_POST = 20;
+  const ALL_EVENT_TYPES: EventType[] = useMemo(() => {
+    const seen = new Set<EventType>();
+    for (const r of rows) if (r.et) seen.add(r.et);
+    return Array.from(seen);
+  }, [rows]);
+  const [anatomyTypes, setAnatomyTypes] = useState<EventType[]>(["AI", "Political", "Fed", "Macro"]);
+
+  // Composite D-5..D+20 path for each selected event type.
+  const anatomyData = useMemo(() => {
+    // Build offset → { offset, [type]: avg } record.
+    const offsets: number[] = [];
+    for (let i = -ANATOMY_PRE; i <= ANATOMY_POST; i++) offsets.push(i);
+    type Row2 = { offset: number; label: string } & Partial<Record<EventType, number>>;
+    const out: Row2[] = offsets.map(o => ({ offset: o, label: o === 0 ? "D+0" : (o > 0 ? `D+${o}` : `D${o}`) }));
+
+    for (const type of anatomyTypes) {
+      // For each event of this type, build a cum return path indexed by offset.
+      const paths: number[][] = []; // paths[i][offsetIdx] = cum return from D-5
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i].et !== type) continue;
+        // Need window from i-5 to i+20 all inside rows.
+        if (i - ANATOMY_PRE < 0 || i + ANATOMY_POST >= rows.length) continue;
+        const path: number[] = [];
+        let cum = 0;
+        // D-5 baseline starts at 0 (we measure cumulative return FROM D-5).
+        for (let k = -ANATOMY_PRE; k <= ANATOMY_POST; k++) {
+          const idx = i + k;
+          // Skip the D-5 day's return so D-5 starts at exactly 0; accumulate the
+          // return earned moving from the previous session into this one.
+          if (k > -ANATOMY_PRE) cum += rows[idx].qqq;
+          path.push(cum);
+        }
+        paths.push(path);
+      }
+      if (paths.length === 0) continue;
+      for (let oi = 0; oi < offsets.length; oi++) {
+        let sum = 0;
+        for (const p of paths) sum += p[oi];
+        out[oi][type] = sum / paths.length;
+      }
+    }
+    return out;
+  }, [rows, anatomyTypes]);
+
+  // ── Outcome Simulator state ───────────────────────────────
+  const [simType, setSimType] = useState<EventType>("AI");
+  const [simWindow, setSimWindow] = useState<number>(5);
+
+  const simResults = useMemo(() => {
+    // For every event of simType, compute cumulative QQQ return over next simWindow sessions.
+    const outcomes: Array<{ date: string; en: string | undefined; ret: number }> = [];
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].et !== simType) continue;
+      if (i + simWindow >= rows.length) continue;
+      let cum = 0;
+      for (let k = 1; k <= simWindow; k++) cum += rows[i + k].qqq;
+      outcomes.push({ date: rows[i].date, en: rows[i].en, ret: cum });
+    }
+    if (outcomes.length === 0) {
+      return { outcomes, bins: [], mean: 0, median: 0, best: 0, worst: 0, pctPos: 0, n: 0 };
+    }
+    const vals = outcomes.map(o => o.ret).sort((a, b) => a - b);
+    const median = vals.length % 2 === 1 ? vals[(vals.length - 1) / 2] : (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const best = vals[vals.length - 1];
+    const worst = vals[0];
+    const pctPos = (outcomes.filter(o => o.ret > 0).length / outcomes.length) * 100;
+    // Bin into 1% buckets, anchored to integers, range from floor(worst) to ceil(best).
+    const lo = Math.floor(worst);
+    const hi = Math.ceil(best);
+    const buckets: Array<{ range: string; mid: number; count: number }> = [];
+    for (let b = lo; b < Math.max(lo + 1, hi); b++) {
+      buckets.push({ range: `${b >= 0 ? "+" : ""}${b}%`, mid: b + 0.5, count: 0 });
+    }
+    for (const v of vals) {
+      const idx = Math.min(buckets.length - 1, Math.max(0, Math.floor(v) - lo));
+      buckets[idx].count += 1;
+    }
+    return { outcomes, bins: buckets, mean, median, best, worst, pctPos, n: outcomes.length };
+  }, [rows, simType, simWindow]);
+
+  // ── Return Heatmap (GitHub-style, per year) ───────────────
+  const heatmapByYear = useMemo(() => {
+    // Map date -> row for fast lookup.
+    const byDate = new Map<string, Row>();
+    for (const r of rows) byDate.set(r.date, r);
+
+    const years = Array.from(new Set(rows.map(r => r.date.slice(0, 4)))).sort();
+
+    type Cell = { date: string; row: Row | null; col: number; dow: number };
+    type YearGrid = { year: string; cells: Cell[]; weeks: number; monthLabels: Array<{ col: number; m: string }> };
+    const out: YearGrid[] = [];
+
+    const monthsShort = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    for (const year of years) {
+      const cells: Cell[] = [];
+      const monthLabels: Array<{ col: number; m: string }> = [];
+      const start = new Date(`${year}-01-01T00:00:00Z`);
+      const end = new Date(`${year}-12-31T00:00:00Z`);
+      // Walk every calendar day; only render Mon-Fri.
+      // Column = ISO week index starting from week 0 of the year.
+      const firstDay = new Date(start);
+      const firstDow = (firstDay.getUTCDay() + 6) % 7; // Mon=0..Sun=6
+      // Week 0 begins on the Monday of the week containing Jan 1.
+      const weekStart = new Date(firstDay);
+      weekStart.setUTCDate(firstDay.getUTCDate() - firstDow);
+
+      let col = 0;
+      let lastMonth = -1;
+      const cur = new Date(weekStart);
+      while (cur.getUTCFullYear() <= Number(year) && cur <= end) {
+        // For each weekday Mon..Fri:
+        for (let d = 0; d < 5; d++) {
+          const day = new Date(cur);
+          day.setUTCDate(cur.getUTCDate() + d);
+          if (day.getUTCFullYear() !== Number(year)) {
+            // Out of the year boundary; still consume the cell slot to keep grid aligned.
+            cells.push({ date: "", row: null, col, dow: d });
+            continue;
+          }
+          const iso = day.toISOString().slice(0, 10);
+          const row = byDate.get(iso) ?? null;
+          cells.push({ date: iso, row, col, dow: d });
+          const m = day.getUTCMonth();
+          if (m !== lastMonth && d === 0) {
+            monthLabels.push({ col, m: monthsShort[m] });
+            lastMonth = m;
+          }
+        }
+        cur.setUTCDate(cur.getUTCDate() + 7);
+        col += 1;
+      }
+      out.push({ year, cells, weeks: col, monthLabels });
+    }
+    return out;
+  }, [rows]);
+
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif" }}>
 
@@ -317,7 +530,7 @@ export default function MarketEventDashboard() {
               { badge:"INSIGHT",   label:"Event-Day Volatility", val:`${(s.vol_event/s.vol_non_event).toFixed(2)}×`,  sub:`vs normal days (σ ${s.vol_event.toFixed(2)}% vs ${s.vol_non_event.toFixed(2)}%)`, accent: C.green  },
               { badge:"RECORD",    label:"Best Single Day",      val:`+${s.best.qqq.toFixed(1)}%`, sub:`${fmtDate(s.best.date)} — ${s.best.en?.slice(0,30) ?? ""}`, accent: C.cyan   },
               { badge:"EDGE",      label:"Monday vs Thursday",   val:"+0.40%", sub:"best vs worst day of week spread", accent: C.orange },
-            ].map(k => (
+            ].map((k, idx) => (
               <div key={k.label} style={{
                 position: "relative",
                 background: "rgba(255,255,255,0.07)",
@@ -329,10 +542,13 @@ export default function MarketEventDashboard() {
                 padding: "16px 18px",
                 boxShadow: `0 8px 32px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 0.5px rgba(255,255,255,0.06)`,
                 overflow: "hidden",
-                transition: "box-shadow 0.2s ease, transform 0.2s ease",
+                opacity: mounted ? 1 : 0,
+                transform: mounted ? "translateY(0)" : "translateY(20px)",
+                transition: `opacity 520ms cubic-bezier(0.22,1,0.36,1) ${idx * 100}ms, transform 520ms cubic-bezier(0.22,1,0.36,1) ${idx * 100}ms, box-shadow 0.2s ease`,
+                willChange: "opacity, transform",
               }}
               onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = `0 16px 48px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.18), 0 0 0 0.5px rgba(255,255,255,0.10)`; }}
-              onMouseLeave={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = `0 8px 32px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 0.5px rgba(255,255,255,0.06)`; }}
+              onMouseLeave={e => { e.currentTarget.style.transform = mounted ? "translateY(0)" : "translateY(20px)"; e.currentTarget.style.boxShadow = `0 8px 32px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 0.5px rgba(255,255,255,0.06)`; }}
               >
                 {/* specular highlight */}
                 <div style={{ position:"absolute", top:0, left:0, right:0, height:40, background:"linear-gradient(to bottom, rgba(255,255,255,0.08), transparent)", borderRadius:"14px 14px 0 0", pointerEvents:"none" }} />
@@ -388,7 +604,7 @@ export default function MarketEventDashboard() {
         {/* ════════════════════════════════════
             SECTION: OVERVIEW
         ════════════════════════════════════ */}
-        <div id="section-overview" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <AnimatedSection id="section-overview">
           <SectionLabel num="01" title="Overview" />
 
             {/* Cumulative Return */}
@@ -512,9 +728,9 @@ export default function MarketEventDashboard() {
               </div>
             </Card>
 
-        </div>
+        </AnimatedSection>
 
-        <div id="section-time-patterns" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <AnimatedSection id="section-time-patterns">
           <SectionLabel num="02" title="Time Patterns" />
 
             {/* Day of week + Monthly side by side */}
@@ -663,9 +879,100 @@ export default function MarketEventDashboard() {
               })()}
             </Card>
 
-        </div>
+            {/* NEW: GitHub-style Daily Return Heatmap (per year, weeks × Mon-Fri) */}
+            <Card accent={C.cyan} style={{ padding:24 }}>
+              <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Daily Return Heatmap — All Sessions</div>
+              <div style={{ fontSize:13, color:C.dim, marginBottom:20, lineHeight:1.5 }}>
+                GitHub-style contribution grid: each cell is one trading day, coloured by QQQ open→close return intensity. Weeks run left-to-right, Mon→Fri top-to-bottom. Years are stacked side-by-side so you can spot regime shifts at a glance.
+              </div>
+              <div style={{ position:"relative" }}>
+                <div style={WM_STYLE}>@Trace_Cohen · t@nyvp.com</div>
+                <div style={{ display:"flex", gap:24, overflowX:"auto", paddingBottom:8 }}>
+                  {heatmapByYear.map(({ year, cells, weeks, monthLabels }) => {
+                    const CELL = 11;
+                    const GAP = 2;
+                    const ROWS = 5; // Mon-Fri
+                    const labelW = 18;
+                    const width = labelW + weeks * (CELL + GAP);
+                    const height = 18 + ROWS * (CELL + GAP);
+                    return (
+                      <div key={year} style={{ flex:"0 0 auto" }}>
+                        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:6 }}>
+                          <div className="mono" style={{ fontSize:13, fontWeight:800, color:C.text }}>{year}</div>
+                        </div>
+                        <svg width={width} height={height} role="img" aria-label={`${year} daily return heatmap`} style={{ display:"block" }}>
+                          {/* Month labels */}
+                          {monthLabels.map(ml => (
+                            <text key={ml.col + ml.m} x={labelW + ml.col * (CELL + GAP)} y={11} fontSize={10} fill={C.dim} fontWeight={700}>{ml.m}</text>
+                          ))}
+                          {/* DOW labels */}
+                          {["M","T","W","T","F"].map((d, di) => (
+                            <text key={d + di} x={0} y={18 + di * (CELL + GAP) + CELL - 2} fontSize={9} fill={C.faint}>{d}</text>
+                          ))}
+                          {cells.map((c, idx) => {
+                            const x = labelW + c.col * (CELL + GAP);
+                            const y = 18 + c.dow * (CELL + GAP);
+                            let fill = "#374151";
+                            let titleStr = "";
+                            if (c.row) {
+                              const q = c.row.qqq;
+                              if (q <= -3) fill = "#dc2626";
+                              else if (q <= -1) fill = "#f87171";
+                              else if (q < 0) fill = "#fca5a5";
+                              else if (q < 1) fill = "#86efac";
+                              else if (q < 3) fill = "#22c55e";
+                              else fill = "#15803d";
+                              titleStr = `${c.row.date}: ${fmtPct(q, 2)}${c.row.en ? " · " + c.row.en : ""}`;
+                            } else if (c.date) {
+                              titleStr = `${c.date}: no session`;
+                            }
+                            // Stagger the entrance: each cell fades in with a small delay based on idx.
+                            const delay = Math.min(idx * 2.5, 1500); // cap so very long grids don't lag
+                            return (
+                              <rect
+                                key={`${year}-${c.col}-${c.dow}-${idx}`}
+                                className="hm-cell"
+                                x={x}
+                                y={y}
+                                width={CELL}
+                                height={CELL}
+                                rx={2}
+                                ry={2}
+                                fill={fill}
+                                style={{ animationDelay: `${delay}ms` }}
+                              >
+                                {titleStr && <title>{titleStr}</title>}
+                              </rect>
+                            );
+                          })}
+                        </svg>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div style={{ marginTop:16, display:"flex", gap:14, alignItems:"center", flexWrap:"wrap" }}>
+                <div style={{ fontSize:11, color:C.dim, fontWeight:600 }}>QQQ Open→Close Return:</div>
+                {[
+                  { bg:"#dc2626", label:"≤ −3%" },
+                  { bg:"#f87171", label:"−1 to −3%" },
+                  { bg:"#fca5a5", label:"0 to −1%" },
+                  { bg:"#86efac", label:"0 to +1%" },
+                  { bg:"#22c55e", label:"+1 to +3%" },
+                  { bg:"#15803d", label:"≥ +3%" },
+                  { bg:"#374151", label:"no session" },
+                ].map(s => (
+                  <div key={s.label} style={{ display:"flex", gap:6, alignItems:"center" }}>
+                    <div style={{ width:10, height:10, borderRadius:2, background:s.bg }} />
+                    <span style={{ fontSize:11, color:C.dim }}>{s.label}</span>
+                  </div>
+                ))}
+              </div>
+            </Card>
 
-        <div id="section-event-intel" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        </AnimatedSection>
+
+        <AnimatedSection id="section-event-intel">
           <SectionLabel num="03" title="Event Intelligence" />
 
             {/* Avg return by type */}
@@ -939,9 +1246,162 @@ export default function MarketEventDashboard() {
               </div>
             </Card>
 
-        </div>
+            {/* NEW: Event Anatomy — D-5 → D+20 composite path */}
+            <Card accent={C.blue} style={{ padding:24 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap", marginBottom:4 }}>
+                <div>
+                  <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Event Anatomy: Average Return Path</div>
+                  <div style={{ fontSize:13, color:C.dim, lineHeight:1.5, maxWidth:760 }}>
+                    Composite average cumulative QQQ return from D-5 through D+20 for each selected event type. The D-5 baseline anchors every event at 0 — every line shows the average <em>relative</em> path a portfolio would have taken around that catalyst. Toggle types below.
+                  </div>
+                </div>
+              </div>
+              <div role="group" aria-label="Event type filters" style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop:14, marginBottom:18 }}>
+                {ALL_EVENT_TYPES.map((t, i) => {
+                  const active = anatomyTypes.includes(t);
+                  const color = ANATOMY_PALETTE[i % ANATOMY_PALETTE.length];
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setAnatomyTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])}
+                      style={{
+                        padding:"5px 14px", borderRadius:20, fontSize:12, fontWeight:700,
+                        border:`1px solid ${active ? color : "rgba(0,0,0,0.12)"}`,
+                        background: active ? color + "1a" : "transparent",
+                        color: active ? color : C.dim,
+                        cursor:"pointer", fontFamily:"inherit",
+                        transition:"all 0.15s ease",
+                      }}
+                    >
+                      <span style={{ display:"inline-block", width:8, height:8, borderRadius:"50%", background:color, marginRight:8, verticalAlign:"middle", opacity: active ? 1 : 0.4 }} />
+                      {TYPE_META[t]?.label ?? t}
+                    </button>
+                  );
+                })}
+              </div>
+              <ChartWrap height={300}>
+                <ComposedChart data={anatomyData} margin={{ top:8, right:16, bottom:4, left:8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
+                  <XAxis dataKey="label" tick={{ fill:C.dim, fontSize:11 }} interval={1} />
+                  <YAxis tick={{ fill:C.dim, fontSize:11 }} tickFormatter={v => fmtPct(v as number, 1)} />
+                  <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown, name:unknown) => [fmtPct(v as number, 3), name as string]} labelFormatter={v => `Offset: ${v}`} />
+                  <ReferenceLine y={0} stroke={C.dim} strokeWidth={1} />
+                  <ReferenceLine x="D+0" stroke={C.orange} strokeDasharray="4 3" strokeWidth={1.5} label={{ value:"D+0 Event Day", position:"top", fill:C.orange, fontSize:10, fontWeight:700 }} />
+                  {anatomyTypes.map((t, idx) => {
+                    const palIdx = ALL_EVENT_TYPES.indexOf(t);
+                    const color = ANATOMY_PALETTE[(palIdx >= 0 ? palIdx : idx) % ANATOMY_PALETTE.length];
+                    return (
+                      <Line
+                        key={t}
+                        type="monotone"
+                        dataKey={t}
+                        stroke={color}
+                        strokeWidth={2.5}
+                        dot={false}
+                        name={t}
+                        isAnimationActive
+                        animationBegin={idx * 180}
+                        animationDuration={900}
+                      />
+                    );
+                  })}
+                  <Legend />
+                </ComposedChart>
+              </ChartWrap>
+              <div style={{ marginTop:10, fontSize:11, color:C.faint }}>
+                Each line = composite average path across every annotated event of that type with a complete D-5 to D+20 window in the dataset.
+              </div>
+            </Card>
 
-        <div id="section-trends" style={{ display:"flex", flexDirection:"column", gap:20 }}>
+            {/* NEW: Outcome Simulator */}
+            <Card accent={C.green} style={{ padding:24 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap", marginBottom:4 }}>
+                <div>
+                  <div style={{ fontWeight:700, fontSize:15, color:C.text, marginBottom:4 }}>Outcome Simulator</div>
+                  <div style={{ fontSize:13, color:C.dim, lineHeight:1.5, maxWidth:720 }}>
+                    Pick an event type and a forward window. We compute the cumulative QQQ return over the next N trading sessions following <em>every</em> occurrence and plot the distribution.
+                  </div>
+                </div>
+              </div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:12, marginTop:16, marginBottom:18, alignItems:"center" }}>
+                <label style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                  <span style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:"0.08em", textTransform:"uppercase" }}>Event Type</span>
+                  <select
+                    value={simType}
+                    onChange={e => setSimType(e.target.value as EventType)}
+                    style={{
+                      padding:"7px 12px", borderRadius:10, border:"1px solid rgba(0,0,0,0.14)",
+                      background:"#fff", color:C.text, fontSize:13, fontFamily:"inherit", fontWeight:600,
+                      cursor:"pointer", minWidth:180,
+                    }}
+                  >
+                    {ALL_EVENT_TYPES.map(t => (
+                      <option key={t} value={t}>{TYPE_META[t]?.label ?? t}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                  <span style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:"0.08em", textTransform:"uppercase" }}>Lookback Window</span>
+                  <select
+                    value={simWindow}
+                    onChange={e => setSimWindow(Number(e.target.value))}
+                    style={{
+                      padding:"7px 12px", borderRadius:10, border:"1px solid rgba(0,0,0,0.14)",
+                      background:"#fff", color:C.text, fontSize:13, fontFamily:"inherit", fontWeight:600,
+                      cursor:"pointer", minWidth:180,
+                    }}
+                  >
+                    {[1, 3, 5, 10].map(n => <option key={n} value={n}>Next {n} session{n === 1 ? "" : "s"}</option>)}
+                  </select>
+                </label>
+                <div style={{ marginLeft:"auto", fontSize:12, color:C.dim, fontWeight:600 }} aria-live="polite">
+                  Based on <span className="mono" style={{ color:C.text, fontWeight:800 }}>{simResults.n}</span> historical event{simResults.n === 1 ? "" : "s"}
+                </div>
+              </div>
+
+              {simResults.n === 0 ? (
+                <div style={{ padding:"40px 20px", textAlign:"center", color:C.faint, fontSize:13 }}>
+                  No qualifying events for this combination.
+                </div>
+              ) : (
+                <>
+                  <ChartWrap height={220}>
+                    <BarChart data={simResults.bins} margin={{ top:4, right:8, bottom:4, left:8 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" />
+                      <XAxis dataKey="range" tick={{ fill:C.dim, fontSize:10 }} />
+                      <YAxis tick={{ fill:C.dim, fontSize:11 }} allowDecimals={false} />
+                      <Tooltip {...CHART_TOOLTIP} formatter={(v:unknown) => [v as number, "Events"]} labelFormatter={v => `Bucket: ${v}`} />
+                      <ReferenceLine x={`${simResults.median >= 0 ? "+" : ""}${Math.floor(simResults.median)}%`} stroke={C.orange} strokeDasharray="3 3" />
+                      <Bar dataKey="count" radius={[4,4,0,0]} isAnimationActive animationDuration={600}>
+                        {simResults.bins.map(b => (
+                          <Cell key={b.range} fill={b.mid >= 0 ? C.green : C.red} fillOpacity={0.82} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ChartWrap>
+                  <div style={{ marginTop:16, display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:10 }}>
+                    {[
+                      { label:"Mean",       val: fmtPct(simResults.mean, 2),   color: simResults.mean   >= 0 ? C.green : C.red },
+                      { label:"Median",     val: fmtPct(simResults.median, 2), color: simResults.median >= 0 ? C.green : C.red },
+                      { label:"Best Case",  val: fmtPct(simResults.best, 2),   color: C.green },
+                      { label:"Worst Case", val: fmtPct(simResults.worst, 2),  color: C.red },
+                      { label:"% Positive", val: `${simResults.pctPos.toFixed(0)}%`, color: simResults.pctPos >= 50 ? C.green : C.orange },
+                    ].map(s => (
+                      <div key={s.label} style={{ background:"rgba(0,0,0,0.03)", borderRadius:10, padding:"10px 14px" }}>
+                        <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:"0.08em", textTransform:"uppercase" }}>{s.label}</div>
+                        <div className="mono" style={{ fontSize:17, fontWeight:800, color:s.color, marginTop:4 }}>{s.val}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </Card>
+
+        </AnimatedSection>
+
+        <AnimatedSection id="section-trends">
           <SectionLabel num="04" title="Trends" />
 
             {/* Rolling volatility */}
@@ -1072,9 +1532,9 @@ export default function MarketEventDashboard() {
               </div>
             </Card>
 
-        </div>
+        </AnimatedSection>
 
-        <div id="section-timeline" style={{ display:"flex", flexDirection:"column", gap:0 }}>
+        <AnimatedSection id="section-timeline" style={{ gap: 0 }}>
           <SectionLabel num="05" title="Full Timeline" />
           <div style={{ marginBottom:16 }} />
             {/* Filters */}
@@ -1182,7 +1642,7 @@ export default function MarketEventDashboard() {
                 }}>Next →</button>
               </div>
             )}
-        </div>
+        </AnimatedSection>
 
         {/* Footer */}
         <footer style={{ marginTop:48, paddingTop:24, borderTop:"1px solid rgba(0,0,0,0.08)", display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
@@ -1238,6 +1698,9 @@ export default function MarketEventDashboard() {
         @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:0.4}}
         .nav-glass{background:rgba(0,0,0,0.62);backdrop-filter:blur(24px) saturate(1.8);-webkit-backdrop-filter:blur(24px) saturate(1.8);border-bottom:1px solid rgba(255,255,255,0.10);box-shadow:0 1px 0 rgba(255,255,255,0.04), inset 0 1px 0 rgba(255,255,255,0.07);}
         @media(max-width:680px){.two-col{grid-template-columns:1fr !important;}}
+        .hm-cell{opacity:0;animation:hmFade 380ms ease forwards;will-change:opacity;}
+        @keyframes hmFade{from{opacity:0;transform:scale(0.6)}to{opacity:1;transform:scale(1)}}
+        select:focus{outline:none;box-shadow:0 0 0 3px rgba(0,113,227,0.18);}
       `}</style>
     </div>
   );
